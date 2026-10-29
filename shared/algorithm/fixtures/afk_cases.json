@@ -1,0 +1,62 @@
+{
+ "tolerance": 0,
+ "cases": [
+  {
+   "name": "clean_run",
+   "events": [
+    [
+     1000,
+     "input"
+    ],
+    [
+     3000,
+     "input"
+    ],
+    [
+     9000,
+     "input"
+    ]
+   ],
+   "task_end_ms": 11000,
+   "expected_active_ms": 11000
+  },
+  {
+   "name": "one_idle_gap",
+   "events": [
+    [
+     1000,
+     "input"
+    ],
+    [
+     60000,
+     "input"
+    ]
+   ],
+   "task_end_ms": 61000,
+   "expected_active_ms": 27000
+  },
+  {
+   "name": "focus_lost",
+   "events": [
+    [
+     1000,
+     "input"
+    ],
+    [
+     5000,
+     "focus_out"
+    ],
+    [
+     50000,
+     "focus_in"
+    ],
+    [
+     52000,
+     "input"
+    ]
+   ],
+   "task_end_ms": 53000,
+   "expected_active_ms": 8000
+  }
+ ]
+}
