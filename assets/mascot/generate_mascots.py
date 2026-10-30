@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Маскот Threelanguage — трёхголовый пиксель-арт дракон. v3: 128x128, КРАСНЫЙ.
+"""Маскот Threelanguage — трёхголовый пиксель-арт дракон. v4: 256x256 RGBA, КРАСНЫЙ.
 
-Рендер: дизайн-сетка 64 -> устройство 128 (ровный блок 2x2). Палитра/геометрия
-редактируются здесь; перегенерация: `python3 generate_mascots.py`.
+Рендер: дизайн-сетка 64 -> устройство 256 (ровный блок 4x4; картинка та же,
+хранится вдвое крупнее). Прозрачность — через альфа-канал RGBA (фон = alpha 0).
+Силуэт центрируется в холсте по bounding-box с симметричными полями.
+Палитра/геометрия редактируются здесь; перегенерация: `python3 generate_mascots.py`.
 """
 import zlib, struct, os
 
@@ -24,7 +26,8 @@ FIRE_I = (255, 220, 90)
 NONE   = None
 
 D    = 64    # дизайн-сетка
-S    = 128   # выходной размер (128x128), блок 2x2
+B    = 4     # блок масштабирования: картинка та же, хранение вдвое крупнее (128->256)
+S    = D*B   # выходной размер 256x256
 W = H = S
 OUTDIR = os.path.dirname(os.path.abspath(__file__)) or '.'
 
@@ -36,15 +39,15 @@ def draw(mood):
     grid = [[NONE]*W for _ in range(H)]
     def px(x, y, c):
         if 0 <= x < W and 0 <= y < H: grid[y][x] = c
-    def rect(x0, y0, x1, y1, c, overwrite=True):  # inclusive, дизайн-сетка, блок 2x2
-        for y in range(y0*2, (y1+1)*2):
-            for x in range(x0*2, (x1+1)*2):
+    def rect(x0, y0, x1, y1, c, overwrite=True):  # inclusive, дизайн-сетка, блок BxB
+        for y in range(y0*B, (y1+1)*B):
+            for x in range(x0*B, (x1+1)*B):
                 if overwrite or grid[y][x] is None: px(x, y, c)
     def outline_block(x, y, c):             # аутлайн: только в пустые ячейки
         rect(x, y, x, y, c, overwrite=False)
     def pxs(x, y, c): rect(x, y, x, y, c)
     def pxs_shadow(x, y):  # затемнить СУЩЕСТВУЮЩИЙ красный пиксель (кромка), не трогать лицо/пустоту
-        if grid[y*2][x*2] in (SKIN, SKIN_D): rect(x, y, x, y, SKIN_D)
+        if grid[y*B][x*B] in (SKIN, SKIN_D): rect(x, y, x, y, SKIN_D)
     def line(xs, y, c):
         for x in xs: pxs(x, y, c)
 
@@ -120,11 +123,11 @@ def draw(mood):
     for x in range(5, 12): pxs_shadow(x, 19)
     for x in range(34, 41): pxs_shadow(x, 19)
 
-    # outline pass: 1px по дизайн-сетке -> 2px блоки (crisp pixel-art)
+    # outline pass: 1px по дизайн-сетке -> BxB блоки (crisp pixel-art)
     dgrid = [[NONE]*D for _ in range(D)]
     for y in range(D):
         for x in range(D):
-            dgrid[y][x] = grid[y*2][x*2]
+            dgrid[y][x] = grid[y*B][x*B]
     added=[]
     for y in range(D):
         for x in range(D):
@@ -136,43 +139,78 @@ def draw(mood):
     for x,y in added:
         outline_block(x, y, INK)
 
+    return grid
+
+
+def center_grid(grid):
+    """Центрирование силуэта в холсте: bounding-box непустых пикселей -> симметричные поля."""
+    H_ = len(grid); W_ = len(grid[0])
+    ys = [y for y in range(H_) if any(c is not None for c in grid[y])]
+    xs = [x for x in range(W_) if any(grid[y][x] is not None for y in range(H_))]
+    if not ys or not xs:
+        return grid
+    y0, y1 = ys[0], ys[-1]; x0, x1 = xs[0], xs[-1]
+    bh, bw = y1-y0+1, x1-x0+1
+    oy = (H_ - bh)//2; ox = (W_ - bw)//2
+    out = [[NONE]*W_ for _ in range(H_)]
+    for j in range(bh):
+        for i in range(bw):
+            out[oy+j][ox+i] = grid[y0+j][x0+i]
+    return out
+
+
+def grid_to_rgba(grid):
+    """RGBA-изображение: пустые пиксели имеют альфа=0 (настоящая прозрачность)."""
+    pal = sorted({c for row in grid for c in row if c is not None})
+    lut = {c: tuple(c) + (255,) for c in pal}
+    img = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    img.putdata([lut[v] if v is not None else (0, 0, 0, 0)
+                 for row in grid for v in row])
+    return img
+
+
+def encode_fallback(grid):
+    """PNG без PIL (indexed): пустые пиксели -> прозрачность через tRNS-чип."""
     palette=[]; idx={}
     for row in grid:
         for c in row:
             if c is not None and c not in idx:
                 idx[c]=len(palette); palette.append(c)
     plte=b'\x00\x00\x00'+b''.join(bytes(c) for c in palette)
+    trns=bytes([0]+[255]*len(palette))
     raw=b''.join(b'\x00'+bytes(0 if c is None else idx[c]+1 for c in row) for row in grid)
     ihdr=struct.pack(">IIBBBBB",W,H,8,3,0,0,0)
     png=(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',ihdr)+chunk(b'PLTE',plte)
-         +chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))
-    return png, grid, palette, idx
+         +chunk(b'tRNS',trns)+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))
+    return png, palette, idx
+
 
 MOODS = (('idle','dragon_idle'),('cheer','dragon_cheer'),
          ('angry','dragon_angry'),('sad','dragon_sad'),('sleep','dragon_sleep'))
 
 grids = {}
 for mood, name in MOODS:
-    png, grid, palette, idx = draw(mood)
-    grids[name] = (grid, palette, idx)
-    with open(os.path.join(OUTDIR, name+'.png'),'wb') as f: f.write(png)
-    print(name, f"{S}x{S}", len(png), 'bytes')
+    grid = center_grid(draw(mood))
+    grids[name] = grid
+    # Официальный файл: RGBA 256x256 с альфа-каналом (прозрачный фон).
+    if Image is not None:
+        grid_to_rgba(grid).save(os.path.join(OUTDIR, name+'.png'))
+    else:
+        png, palette, idx = encode_fallback(grid)
+        with open(os.path.join(OUTDIR, name+'.png'),'wb') as f: f.write(png)
+    print(name, f"{W}x{H}", 'RGBA')
 
 if Image is not None:
-    Z, PAD = 2, 16   # плитка 256px
-    sheet = Image.new('RGB', (5*(S*Z)+PAD*6, S*Z+PAD*2), (24,24,32))
+    PAD = 16   # плитки нативные 256px
+    sheet = Image.new('RGB', (5*W+PAD*6, H+PAD*2), (24,24,32))
     for n,(mood,name) in enumerate(MOODS):
-        grid, palette, idx = grids[name]
-        pal_rgba = [(0,0,0,0)] + [tuple(c)+(255,) for c in palette]
-        tile = Image.new('RGBA',(S,S))
-        tile.putdata([(0,0,0,0) if v is None else pal_rgba[idx[v]+1] for row in grid for v in row])
-        tile = tile.resize((S*Z,S*Z), Image.NEAREST)
-        bg = Image.new('RGBA',(S*Z,S*Z),(40,40,52,255))
+        tile = grid_to_rgba(grids[name])
+        bg = Image.new('RGBA',(W,H),(40,40,52,255))
         checker = Image.new('RGBA',(16,16),(48,48,62,255))
-        for yy in range(0,S*Z,16):
-            for xx in range(0,S*Z,16):
+        for yy in range(0,H,16):
+            for xx in range(0,W,16):
                 if (xx//16+yy//16)%2==0: bg.paste(checker,(xx,yy))
         bg.alpha_composite(tile)
-        sheet.paste(bg.convert('RGB'), (PAD+n*(S*Z+PAD), PAD))
+        sheet.paste(bg.convert('RGB'), (PAD+n*(W+PAD), PAD))
     sheet.save(os.path.join(OUTDIR,'preview_sheet.png'))
     print('preview_sheet.png saved')
