@@ -1,1 +1,7 @@
 __pycache__/
+*.pyc
+build/
+.cxx/
+.gradle/
+local.properties
+*.db
