@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Threelanguage — макет домашнего виджета</title>
+<style>
+  :root{
+    --ink:#f2eefc; --muted:#9b93b5;
+    --zh:#ff5a5a; --pt:#3ddc84; --gold:#ffd166;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    min-height:100vh; display:flex; align-items:center; justify-content:center; gap:40px;
+    background:#0d0b12 radial-gradient(circle at 30% 20%, #1b1727 0%, #0d0b12 60%);
+    font-family:"Segoe UI", system-ui, sans-serif; color:var(--ink); padding:40px; flex-wrap:wrap;
+  }
+  .caption{position:fixed; top:14px; left:0; right:0; text-align:center; color:#6d6488; font-size:13px; letter-spacing:.06em;}
+  /* ---------- домашний виджет (пропорции Android App Widget 4x2) ---------- */
+  .widget{
+    width:340px; border-radius:26px; overflow:hidden; position:relative;
+    background:linear-gradient(160deg,#262038 0%,#1b1728 55%,#241d33 100%);
+    border:1px solid #38304e; box-shadow:0 18px 50px rgba(0,0,0,.55);
+    image-rendering:pixelated;
+  }
+  .widget::before{ /* лёгкий пиксельный скан-паттерн */
+    content:""; position:absolute; inset:0;
+    background:repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,.012) 3px 4px);
+    pointer-events:none;
+  }
+  header{display:flex; align-items:center; gap:8px; padding:12px 14px 4px;}
+  .logo{width:20px;height:20px;border-radius:6px;background:conic-gradient(from 45deg,#ff5a5a,#ffd166,#3ddc84,#ff5a5a);}
+  .appname{font-size:13px;font-weight:600;letter-spacing:.03em}
+  .date{margin-left:auto;font-size:11px;color:var(--muted)}
+  .streak{padding:2px 14px 10px;font-size:11px;color:var(--gold)}
+  .lang{padding:10px 14px; display:grid; grid-template-columns:34px 1fr auto; gap:10px; align-items:center;}
+  .flag{width:34px;height:26px;border-radius:4px;display:block;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+  .lang .name{font-size:13px;font-weight:600}
+  .lang .sub{font-size:10px;color:var(--muted);margin-top:2px}
+  .bar{grid-column:2/4; height:10px; border-radius:6px; background:#141020; border:1px solid #38304e; overflow:hidden;}
+  .fill{height:100%; border-radius:5px;}
+  .fill.zh{background:linear-gradient(90deg,#c81e3c,var(--zh)); width:66.7%;}
+  .fill.pt{background:linear-gradient(90deg,#189d55,var(--pt)); width:33.3%;}
+  .pct{font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted);min-width:38px;text-align:right}
+  .pct b{color:var(--ink);font-weight:600}
+  /* блок маскота */
+  .mascot-row{display:flex; align-items:center; gap:12px; padding:12px 14px 16px; margin:4px 10px 10px;
+    background:rgba(255,255,255,.035); border:1px solid #38304e; border-radius:16px;}
+  .dragon{width:64px;height:64px;flex:none;animation:breathe 3.2s ease-in-out infinite}
+  @keyframes breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+  .speech{position:relative; font-size:12.5px; line-height:1.45; color:var(--ink); padding:8px 12px;
+    background:#2f2745; border-radius:12px; border:1px solid #4a3f6b;}
+  .speech::before{content:""; position:absolute; left:-7px; top:50%; translate:0 -50%;
+    border:6px solid transparent; border-right-color:#4a3f6b;}
+  .speech .hint{display:block;color:var(--muted);font-size:10.5px;margin-top:3px}
+  footer{display:flex;justify-content:space-between;padding:0 16px 14px;font-size:10px;color:#5f5678}
+  /* compact lockscreen-вариант */
+  .lock{background:transparent;border:none;box-shadow:none;width:300px}
+  .lock .mascot-row{background:rgba(0,0,0,.25)}
+  .note{position:fixed;bottom:12px;left:0;right:0;text-align:center;color:#4c4463;font-size:11px}
+</style>
+</head>
+<body>
+<div class="caption">Threelanguage · макет домашнего виджета (4×2) — домашний экран слева, compact lockscreen-вариант справа</div>
+
+<!-- ================= основной домашний виджет ================= -->
+<div class="widget">
+  <header>
+    <div class="logo"></div><div class="appname">Threelanguage</div>
+    <div class="date">пт, 30 окт</div>
+  </header>
+  <div class="streak">🔥 серия 12 дней · дракон бодр</div>
+
+  <!-- Китайский: норма выполнена на 2/3 -->
+  <div class="lang">
+    <img class="flag" alt="Китай" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAADACAYAAADr7b1mAAADHUlEQVR4nO3cMU7EMBBAUUBchG7Pw0E5DxUcBWrSREiJ7eS/12231dd4ZOf56/H4eQKSXmb/AWAeAYAwAYAwAYAwAYAwAYAwAYCw19l/oO7t4/PP7+/3x6R/QpEJAMIEAMIEAMKevQUYa3vm32MnwJlMABAmABAmABBmB3Cy/57599gJcCQTAIQJAIQJAIRdfgdwtbv07gGwEhMAhAkAhAkAhF1uB3C3M/TVdhjciwkAwgQAwgQAwpbfAbhL/5edAUcyAUCYAECYAEDYcjuAo8/8e1Y/Q9/t3gNrMQFAmABAmABA2PQdwOgz/57ZZ2j3HhjJBABhAgBhAgBhw3cAq53598w+Q7sHwJlMABAmABAmABDmHsDG6mdo3wPgSCYACBMACBMACJu+A9jyPQAYxwQAYQIAYQIAYcvtALa8j4fzmAAgTAAgTAAgbPkdwFb9fby3ABzJBABhAgBhAgBhl9sBbN39TFzfeXAuEwCECQCECQCEXX4HcDfePjCSCQDCBADCBADC7AAW5x4AZzIBQJgAQJgAQJgdwMXc/e0DY5kAIEwAIEwAIMwOYDJnemYyAUCYAECYAECYHcBg7vazEhMAhAkAhAkAhNkBnMw3/liZCQDCBADCBADC7AAGcw+AlZgAIEwAIEwAIMwOYDLfA2AmEwCECQCECQCE2QFAmAkAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwn4BVlOQdxmxR4IAAAAASUVORK5CYII=">
+    <div><div class="name">Китайский · 中文</div><div class="sub">20 из 30 мин сегодня</div></div>
+    <div class="pct"><b>67</b>%</div>
+    <div class="bar"><div class="fill zh"></div></div>
+  </div>
+
+  <!-- Португальский (Бразилия): норма выполнена на 1/3 -->
+  <div class="lang">
+    <img class="flag" alt="Бразилия" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAADACAYAAADr7b1mAAAEkklEQVR4nO3dMa7UVhiG4dyIJZCamj3cFRCabIcFpGIvNCQrYA+pqVkEqceRYlm25/j4fZ7uCmHmotGn///mjP3y9vPrz1+ApF9HvwBgHAEAYQIAwgQAhAkACBMAECYAIEwAQJgAgDABAGECAMIEAIQJAAgTABAmACBMAECYAIAwAQBhAgDCBACECQAIEwAQJgAg7M3oF8BYPz58e/j5t79fB70SRjABQJgAgDABAGE6gJjlzr/25zqBezMBQJgAgDABAGE6gJtb2/m3/n2dwL2YACBMAECYAIAwHcDk9u74R/97OoK5mAAgTABAmACAMB3AZJ6982/l3MBcTAAQJgAgTABAmA7gYp6947/79PXh5+9/fjz0+s4NXJsJAMIEAIQJAAh7efv59efoF1G2dedf7uxXt7VT0Ak8lwkAwgQAhAkACNMBnGzv5/qz7fxr9p4z0BEcywQAYQIAwgQAhOkADnb3z/XP5tzAc5kAIEwAQJgAgDAdwEajP9f//uX3x+v98deu612dcwPnMgFAmACAMAEAYTqAFUfv/MsdfvP1Fjv/2vXu1hHoBI5lAoAwAQBhAgDCdAALh9+X//3jf++zd/KtncPVO4Ojn1tQ7wRMABAmACBMAEBYrgM4/dl7g3f+vWb7rsHRncDS3TsCEwCECQAIEwAQdvsOwM6/z2zfNdAJbGMCgDABAGECAMLejH4Be52+46+42g58tLXfb7aOYK+199tsHYEJAMIEAIQJAAibrgMYvfPz6G47/l7L9+fVOwETAIQJAAgTABB2uQ7Ajn8vs91f4GhXPzdgAoAwAQBhAgDChncAdv57W3uWYa0TWBp9bsAEAGECAMIEAISdfk/Au+347z59Hf0SbuXsTuDsewQ+29EdgQkAwgQAhAkACBv+XIDZOwKdwLH2dgKz7/zOAQBPIwAgTABA2PDvAix3ntk7AfapfTfA/QCAYQQAhAkACBveASyt7UQ6gpbZ7x8wesdfYwKAMAEAYQIAwi7XAaxxbqDFzn8uEwCECQAIEwAQNl0HsOTcQMvocwGz7fhrTAAQJgAgTABA2PB7Aj7b2Z2AewQ+19n3ALzbzr9kAoAwAQBhAgDCch3AmqM7Ap3Asf6z879fvH3/edl0vbvv+GtMABAmACBMAEDY9N8FOJr7DUzGzr+LCQDCBACECQAIcw5go72dgHMB2+w962/n/38mAAgTABAmACBMB3CwrR2BTuDR1p3fjr+PCQDCBACECQAI0wGczLmBRz7XvxYTAIQJAAgTABCmAxjs7ucGfK5/bSYACBMAECYAIEwHcDHPvgfhslM4+1l7S3b+sUwAECYAIEwAQJgOYDKzPafAjn9tJgAIEwAQJgAgzLMBJ3P1Zxfa+ediAoAwAQBhAgDCdACTW9u5j+4I7Pj3YgKAMAEAYQIAwnQAN7f33ICd/95MABAmACBMAECYDiBmrROw87eYACBMAECYAIAwHUCcnb/NBABhAgDCBACECQAIEwAQJgAgTABAmACAMAEAYQIAwgQAhAkACBMAECYAIEwAQJgAgDABAGECAMIEAIT9C6jOGaPuh9x4AAAAAElFTkSuQmCC">
+    <div><div class="name">Португальский · Brasil</div><div class="sub">10 из 30 мин сегодня</div></div>
+    <div class="pct"><b>33</b>%</div>
+    <div class="bar"><div class="fill pt"></div></div>
+  </div>
+
+  <!-- Маскот + напоминание -->
+  <div class="mascot-row">
+    <img class="dragon" alt="Дракон" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAAE6ElEQVR4nO3dsYqUOxgG4PFgIbKVLBZWghcgHAvB0tJ2Ows7m9N6HdvaCKc8na2lpWCh4AUIVhayWC1i52mdFDvE/P/8Sd7n6Yadnc1s4OXLN0lmtwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgJld23oAs7t36/TX74/fvnl15fMfP3l+5c8/f7/Ym7Py9VufXzu+8vUZy19bDwDYjgCAYAIAgl3fegDse3Hz5Mqfn+92e2v4pZ9PFhUABBMAEEwAQDABAMEEAAQTABBMAEAw+7hXVu69f337dKuhLOLs28XeY2cBxqYCgGACAIIJAAjW/VmA2vPux3ZofLMbfX62Ht/WVAAQTABAMAEAwbrrAfzBHXqL3om39h16s2mdn9LS81U7vrSegAoAggkACCYAIFh3PYBas92hd//t31XP//T441Ffr9Vs8zU6FQAEEwAQTABAsOF7ALO78+D93uOvHx529XqMTQUAwQQABBMAEKy7fc+z36F36P30vg+g9v30Lv2OQxUABBMAEEwAQDD7ADqz9F78tff2MzYVAAQTABBMAECw4XsAvX9u3qr8nHppx/4cf/b5Go0KAIIJAAgmACDY8D2A0mzn50ffa3/IbPM1GhUABBMAEEwAQLDpegBLr/l6W0PWnsfv/fz+7PPVOxUABBMAEEwAQLDu7j9LvxOwd7O/H3cCAjEEAAQTABBs+H0As52XT2P+tqUCgGACAIIJAAg2fA9gtDVe7Zp37fe39hr8kNHmbzYqAAgmACCYAIBgw/cASr2flz+017w8C3FsW4+v9/mbjQoAggkACCYAINh0PYDaNaA1Y1/M33GpACCYAIBgAgCCCQAIJgAgmACAYAIAgnW3D6Dci3622zXtPX9x86RpPI9Obuw9rj0/P9s9863zU35u/+7yZ9N4zn9cNv3+bPNTSwUAwQQABBMAEKy7HkCpdo1Wnlcv1/BLS19Dtt4f0Do/ZQ8gfT5qqQAgmACAYAIAggkACCYAIJgAgGACAIIJAAgmACCYAIBgAgCCdX8WoHdbf5ff0mZ7P1xNBQDBBAAEEwAQTA+g0mzfRTfb+9la2UPp/X4CFQAEEwAQTABAMD0A+E3rPojyeyjOi+9N6K0noAKAYAIAggkACKYHQLRyzb/0vojW7y5cmwoAggkACCYAIJgeQKW7L59uPYShffnnv1Vf330GdVQAEEwAQDABAMH0ABia+wzaqAAgmACAYAIAgukBQIWzbxdVz+/t/H9JBQDBBAAEEwAQTA8AGvS+xj9EBQDBBAAEEwAQTABAMAEAwQQABBMAEMw+AIZWuze/1eif+5dUABBMAEAwAQDB9ACYymxr9LWpACCYAIBgAgCCCQAIJgAgmACAYAIAgsXtA3h3+bPt95/9u9BI+BOPTm5sPYSpqAAgmACAYAIAgk2/b/rerdNfW4+B9dj730YFAMEEAAQTABAsfv1U9ghe3z5d9e+Vd9j1vob1/5mbCgCCCQAIJgAgmACAYAIAggkACCYAIJgAgGACAIIJAAgmACCYAIBgAgCCCQAIJgAgmACAYAIAggkACCYAIJj71gprf4/A6Hfc+f/MRQUAwQQABBMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATOp/IfFDajdUCKYAAAAASUVORK5CYII=">
+    <div class="speech">Ещё часик занятий, не забывай!
+      <span class="hint">Осталось: 中文 10 мин · Brasil 20 мин</span>
+    </div>
+  </div>
+
+  <footer><span>Третья голова спит — добавь язык</span><span>▶ Открыть урок</span></footer>
+</div>
+
+<!-- ================= compact lockscreen-вариант ================= -->
+<div class="widget lock">
+  <header><div class="logo"></div><div class="appname">Threelanguage</div></header>
+  <div class="lang">
+    <img class="flag" alt="Китай" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAADACAYAAADr7b1mAAADHUlEQVR4nO3cMU7EMBBAUUBchG7Pw0E5DxUcBWrSREiJ7eS/12231dd4ZOf56/H4eQKSXmb/AWAeAYAwAYAwAYAwAYAwAYAwAYCw19l/oO7t4/PP7+/3x6R/QpEJAMIEAMIEAMKevQUYa3vm32MnwJlMABAmABAmABBmB3Cy/57599gJcCQTAIQJAIQJAIRdfgdwtbv07gGwEhMAhAkAhAkAhF1uB3C3M/TVdhjciwkAwgQAwgQAwpbfAbhL/5edAUcyAUCYAECYAEDYcjuAo8/8e1Y/Q9/t3gNrMQFAmABAmABA2PQdwOgz/57ZZ2j3HhjJBABhAgBhAgBhw3cAq53598w+Q7sHwJlMABAmABAmABDmHsDG6mdo3wPgSCYACBMACBMACJu+A9jyPQAYxwQAYQIAYQIAYcvtALa8j4fzmAAgTAAgTAAgbPkdwFb9fby3ABzJBABhAgBhAgBhl9sBbN39TFzfeXAuEwCECQCECQCEXX4HcDfePjCSCQDCBADCBADC7AAW5x4AZzIBQJgAQJgAQJgdwMXc/e0DY5kAIEwAIEwAIMwOYDJnemYyAUCYAECYAECYHcBg7vazEhMAhAkAhAkAhNkBnMw3/liZCQDCBADCBADC7AAGcw+AlZgAIEwAIEwAIMwOYDLfA2AmEwCECQCECQCE2QFAmAkAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwgQAwn4BVlOQdxmxR4IAAAAASUVORK5CYII=">
+    <div><div class="name">Китайский</div></div><div class="pct"><b>67</b>%</div>
+    <div class="bar"><div class="fill zh"></div></div>
+  </div>
+  <div class="lang">
+    <img class="flag" alt="Бразилия" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAADACAYAAADr7b1mAAAEkklEQVR4nO3dMa7UVhiG4dyIJZCamj3cFRCabIcFpGIvNCQrYA+pqVkEqceRYlm25/j4fZ7uCmHmotGn///mjP3y9vPrz1+ApF9HvwBgHAEAYQIAwgQAhAkACBMAECYAIEwAQJgAgDABAGECAMIEAIQJAAgTABAmACBMAECYAIAwAQBhAgDCBACECQAIEwAQJgAg7M3oF8BYPz58e/j5t79fB70SRjABQJgAgDABAGE6gJjlzr/25zqBezMBQJgAgDABAGE6gJtb2/m3/n2dwL2YACBMAECYAIAwHcDk9u74R/97OoK5mAAgTABAmACAMB3AZJ6982/l3MBcTAAQJgAgTABAmA7gYp6947/79PXh5+9/fjz0+s4NXJsJAMIEAIQJAAh7efv59efoF1G2dedf7uxXt7VT0Ak8lwkAwgQAhAkACNMBnGzv5/qz7fxr9p4z0BEcywQAYQIAwgQAhOkADnb3z/XP5tzAc5kAIEwAQJgAgDAdwEajP9f//uX3x+v98deu612dcwPnMgFAmACAMAEAYTqAFUfv/MsdfvP1Fjv/2vXu1hHoBI5lAoAwAQBhAgDCdAALh9+X//3jf++zd/KtncPVO4Ojn1tQ7wRMABAmACBMAEBYrgM4/dl7g3f+vWb7rsHRncDS3TsCEwCECQAIEwAQdvsOwM6/z2zfNdAJbGMCgDABAGECAMLejH4Be52+46+42g58tLXfb7aOYK+199tsHYEJAMIEAIQJAAibrgMYvfPz6G47/l7L9+fVOwETAIQJAAgTABB2uQ7Ajn8vs91f4GhXPzdgAoAwAQBhAgDChncAdv57W3uWYa0TWBp9bsAEAGECAMIEAISdfk/Au+347z59Hf0SbuXsTuDsewQ+29EdgQkAwgQAhAkACBv+XIDZOwKdwLH2dgKz7/zOAQBPIwAgTABA2PDvAix3ntk7AfapfTfA/QCAYQQAhAkACBveASyt7UQ6gpbZ7x8wesdfYwKAMAEAYQIAwi7XAaxxbqDFzn8uEwCECQAIEwAQNl0HsOTcQMvocwGz7fhrTAAQJgAgTABA2PB7Aj7b2Z2AewQ+19n3ALzbzr9kAoAwAQBhAgDCch3AmqM7Ap3Asf6z879fvH3/edl0vbvv+GtMABAmACBMAEDY9N8FOJr7DUzGzr+LCQDCBACECQAIcw5go72dgHMB2+w962/n/38mAAgTABAmACBMB3CwrR2BTuDR1p3fjr+PCQDCBACECQAI0wGczLmBRz7XvxYTAIQJAAgTABCmAxjs7ucGfK5/bSYACBMAECYAIEwHcDHPvgfhslM4+1l7S3b+sUwAECYAIEwAQJgOYDKzPafAjn9tJgAIEwAQJgAgzLMBJ3P1Zxfa+ediAoAwAQBhAgDCdACTW9u5j+4I7Pj3YgKAMAEAYQIAwnQAN7f33ICd/95MABAmACBMAECYDiBmrROw87eYACBMAECYAIAwHUCcnb/NBABhAgDCBACECQAIEwAQJgAgTABAmACAMAEAYQIAwgQAhAkACBMAECYAIEwAQJgAgDABAGECAMIEAIT9C6jOGaPuh9x4AAAAAElFTkSuQmCC">
+    <div><div class="name">Португальский</div></div><div class="pct"><b>33</b>%</div>
+    <div class="bar"><div class="fill pt"></div></div>
+  </div>
+  <div class="mascot-row">
+    <img class="dragon" alt="Дракон" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAAE6ElEQVR4nO3dsYqUOxgG4PFgIbKVLBZWghcgHAvB0tJ2Ows7m9N6HdvaCKc8na2lpWCh4AUIVhayWC1i52mdFDvE/P/8Sd7n6Yadnc1s4OXLN0lmtwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgJld23oAs7t36/TX74/fvnl15fMfP3l+5c8/f7/Ym7Py9VufXzu+8vUZy19bDwDYjgCAYAIAgl3fegDse3Hz5Mqfn+92e2v4pZ9PFhUABBMAEEwAQDABAMEEAAQTABBMAEAw+7hXVu69f337dKuhLOLs28XeY2cBxqYCgGACAIIJAAjW/VmA2vPux3ZofLMbfX62Ht/WVAAQTABAMAEAwbrrAfzBHXqL3om39h16s2mdn9LS81U7vrSegAoAggkACCYAIFh3PYBas92hd//t31XP//T441Ffr9Vs8zU6FQAEEwAQTABAsOF7ALO78+D93uOvHx529XqMTQUAwQQABBMAEKy7fc+z36F36P30vg+g9v30Lv2OQxUABBMAEEwAQDD7ADqz9F78tff2MzYVAAQTABBMAECw4XsAvX9u3qr8nHppx/4cf/b5Go0KAIIJAAgmACDY8D2A0mzn50ffa3/IbPM1GhUABBMAEEwAQLDpegBLr/l6W0PWnsfv/fz+7PPVOxUABBMAEEwAQLDu7j9LvxOwd7O/H3cCAjEEAAQTABBs+H0As52XT2P+tqUCgGACAIIJAAg2fA9gtDVe7Zp37fe39hr8kNHmbzYqAAgmACCYAIBgw/cASr2flz+017w8C3FsW4+v9/mbjQoAggkACCYAINh0PYDaNaA1Y1/M33GpACCYAIBgAgCCCQAIJgAgmACAYAIAgnW3D6Dci3622zXtPX9x86RpPI9Obuw9rj0/P9s9863zU35u/+7yZ9N4zn9cNv3+bPNTSwUAwQQABBMAEKy7HkCpdo1Wnlcv1/BLS19Dtt4f0Do/ZQ8gfT5qqQAgmACAYAIAggkACCYAIJgAgGACAIIJAAgmACCYAIBgAgCCdX8WoHdbf5ff0mZ7P1xNBQDBBAAEEwAQTA+g0mzfRTfb+9la2UPp/X4CFQAEEwAQTABAMD0A+E3rPojyeyjOi+9N6K0noAKAYAIAggkACKYHQLRyzb/0vojW7y5cmwoAggkACCYAIJgeQKW7L59uPYShffnnv1Vf330GdVQAEEwAQDABAMH0ABia+wzaqAAgmACAYAIAgukBQIWzbxdVz+/t/H9JBQDBBAAEEwAQTA8AGvS+xj9EBQDBBAAEEwAQTABAMAEAwQQABBMAEMw+AIZWuze/1eif+5dUABBMAEAwAQDB9ACYymxr9LWpACCYAIBgAgCCCQAIJgAgmACAYAIAgsXtA3h3+bPt95/9u9BI+BOPTm5sPYSpqAAgmACAYAIAgk2/b/rerdNfW4+B9dj730YFAMEEAAQTABAsfv1U9ghe3z5d9e+Vd9j1vob1/5mbCgCCCQAIJgAgmACAYAIAggkACCYAIJgAgGACAIIJAAgmACCYAIBgAgCCCQAIJgAgmACAYAIAggkACCYAIJj71gprf4/A6Hfc+f/MRQUAwQQABBMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATOp/IfFDajdUCKYAAAAASUVORK5CYII=">
+    <div class="speech">Ещё часик занятий, не забывай!</div>
+  </div>
+</div>
+
+<div class="note">Прогресс-бары считают «АФК-weight» минуты (см. docs/AFK.md), а не wall-clock</div>
+</body>
+</html>
