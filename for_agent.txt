@@ -1,0 +1,18 @@
+=== HANDOFF: что передать копии агента ===
+СТАТУС ПРОЕКТА
+Threelanguage — изучение 3 языков одновременно. Равноправные нативные клиенты без WebView: Android (Kotlin/Jetpack/Room), Desktop (C++20/Qt6), Backend (FastAPI+PostgreSQL). Маскот — красный трёхголовый пиксельный дракон (3 головы = 3 языка).
+Готово: docs/ (8 спеков: ARCHITECTURE, SRS, AFK, SCORING, SESSIONS, PLACEMENT, PROGRESSION, DATA_SOURCES); shared/algorithm/reference.py — эталон формул (golden truth); порты Kotlin (android/.../core/Srs,Afk,Scoring.kt) и C++ (desktop/core/*.hpp); backend/ (auth/decks/sync/stats/tts_proxy + Dockerfile/compose); assets/mascot/ (5 RGBA PNG 256×256 центрированные + generate_mascots.py); build/ — первый Python-билд (tkinter, заглушка курса "Как переводится Hi? → Привет/Пока/Корова", АФК ×10 медианы, оценка урока 0..100, прогресс дня zh=2/3 pt-BR=1/3); widget_mockup.html; tools_ci.sh (паритет Python/C++, ALL PASSED).
+Не готово: Android Gradle-проект целиком (нет MainActivity/build.gradle), Desktop CMakeLists+Qt main.cpp, Alembic миграции, подключение Kotlin-тестов к CI, полная база уроков, локализация (отложена по решению пользователя).
+КЛЮЧЕВОЕ ЗНАНИЕ — ПУБЛИКАЦИЯ (сожрало ~15 ходов!)
+Пользователь видит файлы ТОЛЬКО когда они созданы/изменены через str_replace_editor. Shell-создание (heredoc/cp/mv/git) — невидимо. Рабочий протокол: каждый файл — editor create/edit → затем git commit для истории → кнопка «Опубликовать» шлёт снапшот событий редактора. Ошибка "No commits between main and questions-on-the-technical-specification-5f40b" = нулевой diff между ветками; лечится правкой комментария через редактор + коммит. ВАЖНО: PR #5f40b закрыт до мержа — содержимое build/ есть только локально в /workspace, при передаче репо убедиться, что папка build/ включена.
+ЗАФИКСИРОВАННЫЕ РЕШЕНИЯ ПОЛЬЗОВАТЕЛЯ
+АФК: темп ≥10×медианы → вес задания = медиана, раздутый замер не входит в среднее. Прогресс: минуты на каждый язык отдельно + прогресс-бар за день. Оценка урока 0..100 против «на отвяжись». Placement-тест адаптивный (IRT 16–24 вопроса) задаёт старт. Типы заданий: аудирование, письмо, говорение вслух + выбор/ввод + мои крючки вовлечения. Готовность к CJK (NFKC+Levenshtein partial_credit, JMDict/CC-CEDICT/KanjiVG). Данные автоматически: Wiktionary, Tatoeba, частотники OPUS/COCA, анки-импорт. Синхронизация: бэкенд + экспорт файла .threelanguage. Локализация отдельными пакетами — позже.
+ОТКРЫТЫЕ ВОПРОСЫ (ждать ответов)
+SRS-lite vs SM-2; TTS espeak-ng vs Piper; Whisper-диктанты сразу или после MVP; лицензии импорта; event-log vs CRDT; self-hosted Postgres vs Supabase; максимум секунд на микрозадание; какие крючки (инкубация цветов/берсерк/streak) в v1; floor АФК для новичков <5 замеров.
+КОНВЕНЦИИ
+Любая правка формулы: reference.py → перегенерировать golden fixtures → порты Kotlin/C++. Схема клиента общая: shared/schema/state.sql. Формат колод: deck_format.json. Маскот только через генератор. Все новые файлы — только через редактор.
+ЧЕКЛИСТ ПРОДОЛЖЕНИЯ
+Прочитать HANDOFF → git log/status → ./tools_ci.sh (зелёный) → ответы по §4 → specs→reference→fixtures→порты → Gradle проект → CMake/Qt проект → Alembic → ingest_data.py → релизный билд APK+AppImage+compose.
+КОНТЕКСТ ПОЛЬЗОВАТЕЛЯ
+Русский, неформальный, проверяет каждое заявление. Нет терминала к контейнеру — верь только событиям редактора. Сам мержит PR. НИКОГДА не писать «я сделал X» без подтверждения выводом инструмента — ловил многократно.
+=== конец передачи ===
