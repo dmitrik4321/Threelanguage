@@ -221,9 +221,10 @@ class Dragon(Frame):
         self.draw()
 
     def draw(self):
-        # перекрасить подложку (тема могла смениться); fg-слой очищаем
+        # перекрасить подложку (тема могла смениться). fg НЕ сбрасываем в "":
+        # ранняя очистка + упавший blit = пустой ImageTk-слот 0x0 («дракон
+        # исчезает/устает» после смены настроения или тика).
         self._surface.put(self._hex_to_tk(self._bg), to=(0, 0, self.size, self.size))
-        self._c.itemconfigure(self._img_id, image="")
         ext = getattr(self, "_external", None)
         src = None
         if ext and ("ext_img", self.size) in self._photos:
@@ -272,15 +273,35 @@ class Dragon(Frame):
         if w > self.size or h > self.size:
             return False
         ox, oy = (self.size - w) // 2, (self.size - h) // 2
-        # путь A: Pillow композит + ImageTk (если сборка Pillow с Tk)
+        # путь A: ImageTk c RGBA-спрайтом НАПРЯМУЮ. Tk 8.6+ сам смешивает
+        # альфу PNG с фоном canvas (-background). Раньше здесь делали RGB-
+        # композит «спрайт на плашке фона» — из-за этого вокруг дракона была
+        # непрозрачная тёмная рамка, не совпадающая с реальным фоном карточки
+        # («уставший вид», «каша»). Убираем подложку: чистый RGBA.
         if ImageTk is not None:
             try:
-                br, bgc, bb = self._bg_rgb()
-                comp = Image.new("RGB", (self.size, self.size), (br, bgc, bb))
-                comp.paste(img, (ox, oy), img)
-                ph = ImageTk.PhotoImage(comp, master=self._c.winfo_toplevel())
+                canvas_bg = str(self._c.cget("background")).lower()
+                theme_hex = "#%02x%02x%02x" % self._bg_rgb()
+                if canvas_bg == theme_hex:
+                    # фон канваса == фон карточки: RGBA смешивает сам Tk, подложка не нужна
+                    shown = img
+                else:
+                    # фон другой (canvas красит surface-плашку цвета темы):
+                    # композитим спрайт ПОВЕРХ этой плашки, иначе альфа-поля
+                    # канваса дадут «тёмную рамку вокруг дракона»
+                    comp = Image.new("RGB", (self.size, self.size), self._bg_rgb())
+                    comp.paste(img, (ox, oy), img)
+                    shown = comp
+                # ВАЖНО: keep-ссылка ДО создания PhotoImage. В этой сборке
+                # Pillow ImageTk без удержания image немедленно GC-ится,
+                # itemconfigure получает висячий pyimageN и канвас рисует
+                # пустоту — это и был «пустой/уставший дракон» при том,
+                # что _render_path честно показывал "ImageTk".
+                self._keep.clear(); self._keep.append(None)
+                ph = ImageTk.PhotoImage(shown)
+                self._keep[-1] = ph
+                self._c.coords(self._img_id, self.size // 2, self.size // 2)
                 self._c.itemconfigure(self._img_id, image=ph)
-                self._keep.append(ph)
                 self._render_path = "ImageTk"
                 return True
             except Exception as e:
@@ -300,14 +321,12 @@ class Dragon(Frame):
             key = f"crop_{name}_{self.size}_{br:x}_{bgc:x}_{bb:x}"
             cropped = self._sprite_dir / f"{key}.png"
             if not cropped.exists():
-                # композит БЕЗ альфы: спрайт на фоне темы. Tk PhotoImage
-                # не умеет альфу PNG и гасит прозрачные пиксели в ЧЁРНЫЙ —
-                # это и были «чёрные дыры/уставший вид». Здесь альфа уже
-                # смешана Pillow'ом, у Tk нет повода что-то гасить.
-                comp = Image.new("RGB", img.size, (br, bgc, bb))
-                comp.paste(img, (0, 0), img)
-                tmp = cropped.with_suffix(".tmp.png")
-                comp.save(tmp); tmp.replace(cropped)   # атомарно против гонок
+                # Путь B нужен только на старых Tk без PNG-альфы: сохраняем
+                # RGBA-кроп как есть — современный Tk смешает альфу сам;
+                # ручную RGB-подложку цвета темы убрали (рамка «плашки»).
+                img.save(cropped.with_suffix(".tmp.png"))
+                import os as _os
+                _os.replace(str(cropped.with_suffix(".tmp.png")), str(cropped))
             p = cropped
         if p.exists():
             try:
@@ -382,31 +401,82 @@ class Dragon(Frame):
         except Exception:
             return (0x14, 0x1A, 0x26)
 
-    def _load_asset(self, path):
-        """PNG → PIL RGBA в габарит виджета. ЦЕЛОЧИСЛЕННЫЙ NEAREST в обе стороны.
+    BLOCK = 4  # ассеты — пиксель-арт с блоком 4x4 px
 
-        Фиксы «уставшего дракона» и «разбросанных пикселей»:
-          * раньше уменьшение шло round(w/sub) — дробная геометрия ломала ряды;
-            теперь ceil-габарит: после subsample сторона гарантированно <= target;
-          * спрайт никогда не рисуется больше canvas (проверка caller'ом);
-          * если PIL не смог привести к честному размеру — возвращаем None,
-            и рисуем через tk.PhotoImage(file=...), Tk читает PNG сам."""
-        img = Image.open(path).convert("RGBA")
-        bbox = img.getbbox()                      # обрезаем прозрачные поля
-        if bbox:
-            img = img.crop(bbox)
-        target = max(8, self.size - 4)
+    @staticmethod
+    def _detect_block(img) -> int:
+        """Найти размер пиксель-блока по горизонтали: минимальный b>=1, при
+        котором все строки состоят только из константных прогонов длиной k*b.
+        Фолбэк — BLOCK. Это защищает от «каши», если ассет пере-масштабирован
+        и его сетка больше не кратна 4."""
         w, h = img.size
-        if max(w, h) > target:                    # уменьшение: ceil => точно влезет
-            sub = -(-max(w, h) // target)
-            img = img.resize((max(1, -(-w // sub)), max(1, -(-h // sub))),
-                             Image.NEAREST)
-        elif max(w, h) <= target // 2:            # увеличение — только целым k
-            k = target // max(w, h)
-            img = img.resize((w * k, h * k), Image.NEAREST)
-        if max(img.width, img.height) > self.size or min(img.size) < 1:
-            return None                           # нестандарт — пусть рисует Tk
-        return img
+        data = img.convert("RGB")
+        px = data.load()
+        import math
+        g = 0
+        for y in range(0, h, max(1, h // 32)):     # выборочные строки
+            run = 1
+            for x in range(1, w):
+                if px[x, y] == px[x - 1, y]:
+                    run += 1
+                else:
+                    g = math.gcd(g, run); run = 1
+            g = math.gcd(g, run)
+            if g == 1:
+                break
+        return g if g >= 1 else 0
+
+    def _load_asset(self, path):
+        """PNG → PIL RGBA в габарит виджета. ТОЛЬКО целочисленные шаги сетки.
+
+        Корень бага «красная каша / половина пикселей вразброс»: getbbox()
+        даёт координаты вроде (36,42)-(219,213), не кратные 4px-сетке блоков,
+        а NEAREST-resize в произвольный размер режет блоки пополам — цвета
+        перемешиваются. Правильный конвейер:
+          1) кроп bbox, расширенный ДО ГРАНИЦ блоков 4x4 (фаза сетки сохранена);
+          2) даунскейл строго каждый блок 4x4 -> 1 px (мажоритарный цвет
+             непрозрачных пикселей блока) — получаем честную пиксельную сетку;
+          3) апскейл только целым коэффициентом NEAREST.
+        Никаких дробных subsample/resize."""
+        img = Image.open(path).convert("RGBA")
+        B = self._detect_block(img) or self.BLOCK
+        bbox = img.getbbox()
+        if not bbox:
+            return None
+        x0, y0, x1, y1 = bbox
+        # выравниваем кроп по сетке блоков, не вылезая за холст
+        x0 = max(0, (x0 // B) * B)
+        y0 = max(0, (y0 // B) * B)
+        x1 = min(img.width, ((x1 + B - 1) // B) * B)
+        y1 = min(img.height, ((y1 + B - 1) // B) * B)
+        crop = img.crop((x0, y0, x1, y1))
+        gw, gh = crop.width // B, crop.height // B
+        if gw < 1 or gh < 1:
+            return None
+        from collections import Counter
+        ca = list(crop.getdata())
+        cw = crop.width
+        out = []
+        for gy in range(gh):
+            row_off = gy * B * cw
+            for gx in range(gw):
+                blk = [ca[row_off + (dy * cw) + gx * B + dx]
+                       for dy in range(B) for dx in range(B)]
+                op = [p[:3] for p in blk if p[3] > 10]
+                if op:
+                    col = Counter(op).most_common(1)[0][0]
+                    out.append(col + (255,))
+                else:
+                    out.append((0, 0, 0, 0))
+        grid = Image.new("RGBA", (gw, gh))
+        grid.putdata(out)
+        # апскейл только целым числом: вписываемся в target по большей стороне
+        target = max(B, self.size - 4)
+        k = max(1, target // max(gw, gh))
+        big = grid.resize((gw * k, gh * k), Image.NEAREST)
+        if max(big.size) > self.size:              # единичный случай guard
+            return None
+        return big
 
     def _via_imagetk(self, img):
         """Fallback: ImageTk (только если Pillow собран с Tk-поддержкой)."""
