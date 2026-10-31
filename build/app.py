@@ -832,6 +832,12 @@ class App:
 
 
 def main():
+    # Понятный отказ вместо «молча крашнулся»: не хватает модулей — говорим что именно.
+    missing = [m for m in ("theme", "widgets", "content", "sync_client", "packs")
+               if not (Path(__file__).resolve().parent / f"{m}.py").exists()]
+    if missing:
+        sys.exit("Не найдены файлы приложения: " + ", ".join(f"build/{m}.py" for m in missing)
+                 + "\nСкачай всю папку build/ целиком (plus shared/algorithm/reference.py).")
     root = TkinterDnD.Tk() if TkinterDnD else Tk()
     App(root)
     root.mainloop()

@@ -183,7 +183,11 @@ class Dragon(Frame):
         self._blink = False
         self._photos: dict[tuple[str, int], object] = {}
         self._img_id = None
-        self._c = Canvas(self, width=size, height=size, bg=_bg_of(master),
+        # фон для композита: canvas рисует поверх bg master'а — прозрачные PNG
+        # пиксели должны совпадать с этим цветом, иначе на Windows/Tk8.6
+        # вместо дракона остаются «осколки» предыдущего кадра (matted-артефакты)
+        self._bg = _bg_of(master)
+        self._c = Canvas(self, width=size, height=size, bg=self._bg,
                          highlightthickness=0)
         self._c.pack(fill="both", expand=True)
         self.draw()
@@ -210,9 +214,7 @@ class Dragon(Frame):
             if key not in self._photos:
                 p = _mascot_dir() / f"{name}.png"
                 if p.exists():
-                    img = Image.open(p).convert("RGBA")
-                    img.thumbnail((self.size - 4, self.size - 4), Image.NEAREST)
-                    self._photos[key] = ImageTk.PhotoImage(img)
+                    self._photos[key] = self._prepare_asset(p)
             ph = self._photos.get(key)
             if ph is not None:
                 self._img_id = self._c.create_image(self.size // 2, self.size // 2,
@@ -220,14 +222,49 @@ class Dragon(Frame):
                 return
         self._placeholder()
 
+    def _prepare_asset(self, path):
+        """PNG-ассет → PhotoImage с ЧИСТОЙ геометрией.
+
+        Что починено по фидбеку «половина пикселей разбросана хрен пойми как»:
+          1. Обрезка по alpha-bbox: в исходных спрайтах вокруг дракона мусорные
+             одинокие пиксельные группы («разбросанные»), после кропа остаётся
+             только сам спрайт.
+          2. Масштабирование целочисленным NEAREST (zoom/subsample), а не
+             thumbnail дробным коэффициентом — дробный NEAREST на пиксель-арте
+             делает неравномерные строки/столбцы (тот самый «рваный» вид).
+          3. Композит поверх реального фона Canvas вместо RGBA-прозрачности:
+             Tk PhotoImage не умеёт альфу, и на Windows полупрозрачные пиксели
+             рендерились случайными артефактами.
+        """
+        img = Image.open(path).convert("RGBA")
+        bbox = img.getbbox()                      # учитывает альфу у RGBA
+        if bbox:
+            img = img.crop(bbox)
+        w, h = img.size
+        target = self.size - 4
+        k = max(1, min(target // max(w, 1), target // max(h, 1)))
+        if k > 1:
+            img = img.resize((w * k, h * k), Image.NEAREST)   # целочисленное увеличение
+        elif (sx := min(target // w, target // h)) >= 1:      # целочисленное уменьшение
+            img = img.subsample(sx)
+        else:                                   # вписать нельзя целым числом — сглаживаем
+            img.thumbnail((target, target), Image.LANCZOS)
+        try:
+            bg_rgb = self._c.winfo_toplevel().winfo_rgb(self._bg)
+            bg = tuple(c >> 8 for c in bg_rgb)
+        except Exception:
+            bg = (0x1a, 0x1a, 0x1e)
+        comp = Image.new("RGB", (self.size, self.size), bg)
+        ox, oy = (self.size - img.width) // 2, (self.size - img.height) // 2
+        comp.paste(img, (ox, oy), img)            # альфа → фон, без артефактов
+        return ImageTk.PhotoImage(comp)
+
     def load_external(self, path) -> bool:
         """Загрузить внешний PNG (drag&drop) вместо ассета настроения."""
         if Image is None:
             return False
         try:
-            img = Image.open(path).convert("RGBA")
-            img.thumbnail((self.size - 4, self.size - 4), Image.NEAREST)
-            self._photos[("ext", self.size)] = ImageTk.PhotoImage(img)
+            self._photos[("ext", self.size)] = self._prepare_asset(path)
             self._external = str(path)
             self.draw()
             return True

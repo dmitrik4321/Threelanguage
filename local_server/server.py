@@ -28,6 +28,7 @@ except ImportError as e:  # pragma: no cover
     raise SystemExit("Нужен Flask: pip install flask") from e
 
 DB_PATH = Path.home() / ".threelanguage" / "local_server.db"
+PORT_FILE = Path.home() / ".threelanguage" / "server_port"
 PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
 ADMIN_TOKEN = os.environ.get("TL_ADMIN_TOKEN", "")  # пусто = без токена (localhost)
 
@@ -268,10 +269,36 @@ def admin():
 
 @app.get("/health")
 def health():
-    return jsonify({"ok": True, "ts": int(time.time())})
+    return jsonify({"ok": True, "ts": int(time.time()), "app": "threelanguage-local"})
 
 
 init_db()
 
+
+def _free_port(preferred: int) -> int:
+    """Первый свободный TCP-порт на 127.0.0.1, начиная с preferred."""
+    import socket
+    for p in [preferred] + [preferred + i for i in range(1, 20)]:
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", p))
+            return p
+        except OSError:
+            continue
+        finally:
+            s.close()
+    raise SystemExit(f"Не нашёл свободный порт рядом с {preferred}")
+
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=PORT)
+    # Порт: TL_SERVER_PORT или 8765; если занят чужим процессом — автовыбор
+    # следующего свободного + запись фактического порта в ~/.threelanguage/server_port,
+    # чтобы десктоп-клиент сам нашёл сервер (см. build/sync_client.py).
+    chosen = _free_port(PORT)
+    if chosen != PORT:
+        print(f"[!] Порт {PORT} занят — использую {chosen}")
+    PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PORT_FILE.write_text(str(chosen))
+    print(f"Threelanguage local server: http://127.0.0.1:{chosen}  "
+          f"(админка: http://127.0.0.1:{chosen}/admin)")
+    app.run(host="127.0.0.1", port=chosen)
