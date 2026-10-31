@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Threelanguage · веб-клиент</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-theme="dark">
+
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">🐉 Threelanguage<span class="tag">web</span></div>
+    <img id="dragon" src="/mascot/dragon_idle.png" alt="дракон" width="120" height="120">
+    <div id="mood" class="dim">…</div>
+    <div id="level-box" class="dim">Уровень: —</div>
+    <div class="sec">Минуты сегодня</div>
+    <div id="minute-bars"></div>
+    <div class="sec">Статистика</div>
+    <div id="stat-box" class="dim">уроков: 0</div>
+    <button id="btn-sync" class="ghost">⇅ Синхронизировать</button>
+    <div id="whoami" class="dim"></div>
+    <nav>
+      <button data-nav="home" class="navb active">Домой</button>
+      <button data-nav="settings" class="navb">⚙ Настройки</button>
+    </nav>
+  </aside>
+
+  <main id="content"></main>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<!-- Ядро: JS-порт эталонного shared/algorithm/reference.py (паритет в тестах) -->
+<script src="/core/web_core.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
