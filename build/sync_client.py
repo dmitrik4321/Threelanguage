@@ -11,7 +11,6 @@ server_port. Клиент читает этот файл и перебирает
 сервер, а приложение его не видит» больше невозможно.
 """
 from __future__ import annotations
-
 import json
 import os
 import urllib.error

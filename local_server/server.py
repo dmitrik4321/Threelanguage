@@ -13,6 +13,14 @@ FastAPI-скелета (auth/register, auth/login, sync/push, sync/pull, stats),
 """
 from __future__ import annotations
 
+"""Локальный сервер Threelanguage: auth, sync, админ-панель (Flask + SQLite, 127.0.0.1).
+
+Lock-файл от двойного запуска; живость pid проверяется БЕЗ os.kill (на Windows это
+TerminateProcess!) — OpenProcess/GetExitCodeProcess + опрос /health.
+Watchdog (TL_PARENT_PID) завершает сервер после смерти GUI-родителя.
+/admin — статистика пользователей и вставка своих примеров.
+"""
+
 import hashlib
 import hmac
 import json

@@ -36,6 +36,9 @@ def check(name, cond):
 root = Tk()
 root.withdraw()
 app = A.App(root)
+# Тест не зависит от сети: фиксируем офлайн-колоды (в рантайме их подменяет
+# живой fetch из data_sources — этот путь проверен отдельным прогоном с сетью).
+app.prefetch_content = lambda: None
 check("старт на домашнем экране", app.mode == "home")
 if app.st.get("placement_done"):
     app.st.update(placement_done=False, level=None); A.save_state(app.st)
@@ -44,9 +47,9 @@ pump(80)
 app.start_placement()  # та же команда, что у кнопки «Placement»
 
 # --- placement: кликаем правильные ответы кнопок / вводим текст
-for i in range(len(A.PLACEMENT_ITEMS)):
+for i in range(len(app.placement_live)):
     pump(60)
-    item = A.PLACEMENT_ITEMS[app._pl_idx]
+    item = app.placement_live[app._pl_idx]
     if "options" in item:
         app._opt_buttons[item["answer"]]._on_click(None)
     else:
@@ -60,7 +63,7 @@ app.start_lesson()
 check("кнопка/команда запуска урока работает", app.mode == "lesson")
 
 # --- урок: отвечаем; на 4-м задании имитируем АФК (пауза > порога медианы)
-tasks = list(A.LESSON["tasks"])
+tasks = list(app.lesson_live["tasks"])
 for idx, t in enumerate(tasks):
     pump(80)
     if app.mode != "lesson":

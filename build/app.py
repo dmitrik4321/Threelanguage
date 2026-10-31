@@ -46,6 +46,7 @@ TXT_RU = {
     "welcome": "Три языка, один дракон.",
 }
 from content import LESSON, PLACEMENT_ITEMS              # noqa: E402
+import data_sources as ds                                 # noqa: E402  живые API (Tatoeba/Wiktionary)
 from widgets import (Card, Dragon, LangBar, MOOD_TO_PNG, PillButton,
                      Toast)  # noqa: E402
 import packs as packscan                            # noqa: E402
@@ -158,10 +159,50 @@ class App:
         for d in "1234":
             tk_root.bind(f"<KeyPress-{d}>", lambda e, i=int(d) - 1: self._hotkey(i))
 
+        # ---- живой контент из свободных API (Tatoeba/Wiktionary), без блокировки UI.
+        # LESSON/PLACEMENT_ITEMS остаются офлайн-заглушками: если сеть недоступна
+        # или fetch ещё не завершился, урок строится из них (см. _current_lesson).
+        self.lesson_live = dict(LESSON)          # активная колода (fallback + live)
+        self.placement_live = list(PLACEMENT_ITEMS)
+        self._content_loading = False
+        tk_root.after(400, self.prefetch_content)
+
         self.update_dashboard()
         self.show_home()
         self.schedule_idle_check()
         self.schedule_blink()
+
+    # ------------------------------------------------------ живой контент
+    def prefetch_content(self):
+        """Грузит уроки/placement из API в фоне; по готовности обновляет колоды.
+        Сетевые ошибки молча оставляют заглушки — приложение всегда рабочее."""
+        if self._content_loading:
+            return
+        self._content_loading = True
+        import threading
+        langs = list(LANG_NAMES)
+
+        def worker():
+            try:
+                lesson = ds.build_lesson(langs)
+                items = ds.placement_items(["pt-BR"])
+            except Exception:
+                lesson, items = None, None
+            # возврат в UI-поток через after_idle (tkinter не тредобезопасен)
+            self.tk.after(0, lambda: self._content_ready(lesson, items))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _content_ready(self, lesson, items):
+        self._content_loading = False
+        changed = False
+        if lesson and lesson.get("tasks"):
+            self.lesson_live = lesson
+            changed = True
+        if items:
+            self.placement_live = items
+        if changed and self.mode == "home" and not self.st["placement_done"]:
+            self.toast.show("Контент обновлён из Tatoeba (CC BY)", T.GREEN, ms=2500)
 
     # ------------------------------------------------------ тема / локаль
     def apply_theme(self, name: str):
@@ -365,19 +406,19 @@ class App:
 
     def show_placement_item(self):
         self.clear_content()
-        if self._pl_idx >= len(PLACEMENT_ITEMS):
+        if self._pl_idx >= len(self.placement_live):
             self.finish_placement()
             return
-        item = PLACEMENT_ITEMS[self._pl_idx]
+        item = self.placement_live[self._pl_idx]
         self.dragon.set_mood("idle")
         c = Card(self.content)
         c.pack(fill="both", expand=True)
 
-        Label(c, text=f"Placement · {self._pl_idx + 1} / {len(PLACEMENT_ITEMS)}",
+        Label(c, text=f"Placement · {self._pl_idx + 1} / {len(self.placement_live)}",
               bg=T.PANEL, fg=T.ACCENT, font=T.FS_SMALL).pack(anchor="w", padx=20, pady=(16, 2))
         prog = LangBar(c, width=400, height=6)
         prog.pack(anchor="w", padx=20)
-        prog.set((self._pl_idx + 1) / len(PLACEMENT_ITEMS))
+        prog.set((self._pl_idx + 1) / len(self.placement_live))
         Label(c, text=item["prompt"], bg=T.PANEL, fg=T.TEXT,
               font=T.FS_TITLE).pack(anchor="w", padx=20, pady=18)
 
@@ -397,7 +438,7 @@ class App:
         self.toast.show("Адаптивный IRT: уровень уточняется с каждым ответом", T.TEXT_DIM, ms=2000)
 
     def current_expected(self):
-        return PLACEMENT_ITEMS[self._pl_idx]["expected"]
+        return self.placement_live[self._pl_idx]["expected"]
 
     def typed_text(self) -> str:
         v = self.entry.get()
@@ -415,7 +456,7 @@ class App:
         self.show_placement_item()
 
     def finish_placement(self):
-        res = core.placement_run(PLACEMENT_ITEMS, self._pl_responses)
+        res = core.placement_run(self.placement_live, self._pl_responses)
         self.st["placement_done"] = True
         self.st["level"] = res["assigned_level"]
         save_state(self.st)
@@ -436,13 +477,13 @@ class App:
     def start_lesson(self):
         self.mode = "lesson"
         self.session_answers = []
-        self.tasks = list(LESSON["tasks"])
+        self.tasks = list(self.lesson_live["tasks"])
         self.task_i = 0
         self.show_task()
 
     def _task_header(self, c, t):
         lang_tag = t["lang"]
-        Label(c, text=f"{LESSON['title']}   ·   {self.task_i + 1} / {len(self.tasks)}",
+        Label(c, text=f"{self.lesson_live['title']}   ·   {self.task_i + 1} / {len(self.tasks)}",
               bg=T.PANEL, fg=T.TEXT_DIM, font=T.FS_SMALL).pack(anchor="w", padx=20, pady=(16, 2))
         prog = LangBar(c, lang=lang_tag, width=400, height=6)
         prog.pack(anchor="w", padx=20)
@@ -525,7 +566,7 @@ class App:
         if verdict["record_to_pace"]:
             self.pace.add(kind, active)
 
-        cid = self.current_task.get("id", f"{LESSON['id']}:{self.task_i}")
+        cid = self.current_task.get("id", f"{self.lesson_live['id']}:{self.task_i}")
         card = core.CardState(**self.st["cards"].get(cid, {}))
         now_ms = int(time.time() * 1000)
         if afk_suspect:
@@ -593,7 +634,7 @@ class App:
         self.mode = "done"
         score = core.score_lesson(self.session_answers, self.pace)
         grade = core.lesson_score_to_grade(score)
-        self.st["history"].append({"lesson": LESSON["id"], "score": score,
+        self.st["history"].append({"lesson": self.lesson_live["id"], "score": score,
                                    "ts": int(time.time()), "n": len(self.session_answers)})
         self.save_now()
         self.update_dashboard()
