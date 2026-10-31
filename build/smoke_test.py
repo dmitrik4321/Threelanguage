@@ -21,10 +21,6 @@ try:
 except Exception as e:
     print("SKIP (нет tkinter/Tk):", e); sys.exit(2)
 
-root = Tk()
-root.withdraw()
-app = A.App(root)
-
 def pump(ms: int):
     """Прокрутить event loop заданное время."""
     end = time.time() + ms / 1000
@@ -37,21 +33,31 @@ def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
     if not cond: fails.append(name)
 
+root = Tk()
+root.withdraw()
+app = A.App(root)
+check("старт на домашнем экране", app.mode == "home")
+if app.st.get("placement_done"):
+    app.st.update(placement_done=False, level=None); A.save_state(app.st)
+    app.show_home()
+pump(80)
+app.start_placement()  # та же команда, что у кнопки «Placement»
+
 # --- placement: кликаем правильные ответы кнопок / вводим текст
 for i in range(len(A.PLACEMENT_ITEMS)):
     pump(60)
     item = A.PLACEMENT_ITEMS[app._pl_idx]
     if "options" in item:
-        # найти нужную кнопку
-        for w in app.body.winfo_children():
-            if hasattr(w, "cget") and w.cget("text") == item["options"][item["answer"]]:
-                w.invoke(); break
+        app._opt_buttons[item["answer"]]._on_click(None)
     else:
         app.entry.insert(0, item["expected"][0])
         app._submit_placement_type()
 pump(1500)
 check("placement завершён и уровень присвоен", app.st["placement_done"] and app.st["level"] in range(1, 7))
-check("после placement стартовал урок", app.mode in ("lesson", "done"))
+check("после placement — экран уровня, урок не стартовал сам", app.mode == "home")
+pump(80)
+app.start_lesson()
+check("кнопка/команда запуска урока работает", app.mode == "lesson")
 
 # --- урок: отвечаем; на 4-м задании имитируем АФК (пауза > порога медианы)
 tasks = list(A.LESSON["tasks"])
@@ -66,10 +72,10 @@ for idx, t in enumerate(tasks):
         time.sleep(0.05)
         app.on_input()
     if "options" in t:
-        app.submit_choice(t["answer"])
+        app._opt_buttons[t["answer"]]._on_click(None)   # реальный путь кнопки
     else:
         app.entry.insert(0, t["expected"][0]); app.submit_type()
-    pump(900)  # ждём after(700) show_task
+    pump(1000)  # ждём after(FEEDBACK_MS) show_task
 
 pump(1200)
 check("урок доигран до экрана итога", app.mode == "done")
@@ -94,6 +100,26 @@ v_fast = A.core.judge_task("CHOICE_T2T", 600_000, A.core.PaceStats())  # нет 
 check("АФК: новичок без замеров — порог CEILING 10мин", not v_fast["afk_suspect"])
 v2 = A.core.judge_task("CHOICE_R2T", 1400, pace)
 check("АФК: честный ответ не бракуется", not v2["afk_suspect"] and v2["record_to_pace"])
+
+# --- сонный дракон: idle-триггер watchdoga (UI-слой, ядро не трогает)
+class _FakeDragon:
+    def set_mood(self, m): self.mood = m
+    def tick(self): pass
+
+class _FakeToast:
+    def __init__(self): self.shown = []
+    def show(self, text, color=None, ms=2600): self.shown.append(text)
+
+app.toast = _FakeToast()   # предыдущий root уничтожен — старые tk-виджеты мертвы
+app.mode = "lesson"; app.task_events = [(0, "focus_in")]; app._dimmed = False
+app.last_input_t = time.time() - 100  # 100с без ввода
+app.dragon = _FakeDragon()
+app._idle_tick()
+check("watchdog: idle>90с → дракон спит, событие focus_out записано",
+      app.dragon.mood == "sleep" and any(e[1] == "focus_out" for e in app.task_events))
+app.on_input()
+check("возврат: focus_in + дракон проснулся",
+      app.dragon.mood == "idle" and any(e[1] == "focus_in" for e in app.task_events))
 
 print("\nSMOKE", "OK" if not fails else f"FAILED: {fails}")
 sys.exit(0 if not fails else 1)
