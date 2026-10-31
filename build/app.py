@@ -782,7 +782,7 @@ class App:
         ждёт /health и пишет лог в ~/.threelanguage/local_server.log — если
         что-то не так, пользователь видит причину в тосте, а не мелькание окна.
         """
-        import subprocess, sys, time, urllib.request
+        import subprocess, sys
         if self.sync.health():
             return
         server_py = Path(__file__).resolve().parent.parent / "local_server" / "server.py"
@@ -804,13 +804,31 @@ class App:
         except Exception as e:
             self.toast.show(f"не удалось поднять сервер: {e}", T.RED)
             return
-        for _ in range(25):                       # до 5 секунд ожидания
-            time.sleep(0.2)
-            if self.sync.health():
-                self.toast.show(f"локальный сервер поднят: {self.sync.base}", T.GREEN)
-                return
-        self.toast.show("сервер запущен, но /health не отвечает — смотри "
-                        f"~/.threelanguage/{log_path.name}", T.RED)
+        # НЕ спать в UI-потоке (time.sleep(0.2)*25 вешал окно настроек на 5 с).
+        # Неблокирующий опрос через tk.after; повторный вход в настройки не
+        # поднимает второй сервер и не плодит циклы опроса.
+        if getattr(self, "_srv_poll_job", None):
+            self.tk.after_cancel(self._srv_poll_job)
+        self._srv_poll_deadline = time.time() + 6.0
+        self._srv_log_path = log_path
+        self._poll_server()
+
+    def _poll_server(self):
+        self._srv_poll_job = None
+        if self.sync.health():
+            self.toast.show(f"локальный сервер поднят: {self.sync.base}", T.GREEN)
+            return
+        if time.time() >= self._srv_poll_deadline:
+            tail = ""
+            try:
+                lines = self._srv_log_path.read_text(errors="replace").splitlines()
+                tail = (" · " + lines[-1]) if lines else ""
+            except OSError:
+                pass
+            self.toast.show("сервер не отвечает" + tail +
+                            f" · полный лог: {self._srv_log_path}", T.RED)
+            return
+        self._srv_poll_job = self.tk.after(200, self._poll_server)
 
     def _do_register(self):
         ok, msg = self.sync.register(*self._auth_fields())

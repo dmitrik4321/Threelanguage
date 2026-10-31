@@ -34,35 +34,91 @@ PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
 ADMIN_TOKEN = os.environ.get("TL_ADMIN_TOKEN", "")  # пусто = без токена (localhost)
 
 
-def _lock_is_stale(path: Path) -> bool:
-    """True, если lock-файл указывает на мёртвый процесс."""
-    try:
-        pid = int(path.read_text().strip())
-    except (OSError, ValueError):
-        return True
-    if pid == os.getpid():
+def _pid_alive(pid: int) -> bool:
+    """Жив ли процесс — БЕЗ os.kill на Windows.
+
+    Критический баг прежней проверки: на Windows os.kill(pid, N) при любом
+    N, кроме CTRL_C_EVENT/CTRL_BREAK_EVENT, вызывает TerminateProcess —
+    т.е. «проба живости» УБИВАЛА процесс. Если pid из stale-lock после
+    перезагрузки рециклировался и принадлежал GUI-приложению, открытие
+    настроек (Popen сервера → acquire_lock → os.kill) мгновенно закрывало
+    окно пользователя. На Unix os.kill(pid, 0) остаётся безвредным probe.
+    """
+    if pid <= 0:
         return False
+    if os.name == "nt":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        try:
+            code = ctypes.c_ulong(0)
+            ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
     try:
-        os.kill(pid, 0)          # существует ли процесс
-        return False
-    except ProcessLookupError:   # процесса нет — lock от упавшего сервера
+        os.kill(pid, 0)
         return True
+    except ProcessLookupError:
+        return False
     except PermissionError:      # чужой процесс — он жив
+        return True
+    except OSError:              # EINVAL и прочее — считаем мёртвым, не падаем
         return False
+
+
+def _health_ok(port: int) -> bool:
+    """Наш ли сервер уже слушает: /health с app == threelanguage-local."""
+    import json as _json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1.5) as r:
+            return (_json.loads(r.read().decode("utf-8", "replace"))
+                    .get("app") == "threelanguage-local")
+    except Exception:
+        return False
+
+
+def _lock_pid(path: Path) -> int:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return -1
 
 
 def acquire_lock():
-    """Один экземпляр сервера. Без этого GUI-автоподнятие и ручной запуск
-    дрались за порт, второй падал с OSError в консоли — пользователь видел
-    «мелькнул логгер и закрылось» («самозакрывающийся сервер»)."""
+    """Один экземпляр сервера. Решение — по ФАКТУ слушания порта, а не по
+    тому, жив ли pid из lock-файла (pid ничего не гарантирует: он мог
+    рециклироваться в чужой процесс). Механизм:
+      • наш /health отвечает            → «уже запущен», вежливый выход;
+      • не отвечает, pid мёртв          → stale-lock, чистим и стартуем;
+      • не отвечает, pid жив (чужой)    → ждём 1–2 с (сервер мог только
+        стартовать), переспрашиваем /health, потом всё равно чистим.
+    Никакого os.kill для чужих pid — никого не убиваем."""
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    port_now = PORT
+    if PORT_FILE.exists():
+        try:
+            port_now = int(PORT_FILE.read_text().strip())
+        except ValueError:
+            pass
     if LOCK_FILE.exists():
-        if _lock_is_stale(LOCK_FILE):
-            LOCK_FILE.unlink(missing_ok=True)     # мусор от упавшего — чистим
-        else:
-            print(f"[!] Сервер уже запущен (pid {LOCK_FILE.read_text().strip()}). "
-                  f"Адрес: http://127.0.0.1:{PORT_FILE.read_text().strip() if PORT_FILE.exists() else PORT}")
-            raise SystemExit(0)                   # не падение, а вежливый выход
+        pid = _lock_pid(LOCK_FILE)
+        if _health_ok(port_now):
+            print(f"[!] Сервер уже запущен: http://127.0.0.1:{port_now} "
+                  f"(pid lock: {pid}). Выход, ничего не убивая.")
+            raise SystemExit(0)
+        if pid != os.getpid() and _pid_alive(pid):
+            for _ in range(8):                    # до ~2 секунд
+                time.sleep(0.25)
+                if _health_ok(port_now):
+                    print(f"[!] Сервер поднялся параллельно: http://127.0.0.1:{port_now}")
+                    raise SystemExit(0)
+            print(f"[!] В lock pid {pid}, но он не наш сервер (/health молчит) — "
+                  f"stale-lock, перезабираем.")
+        LOCK_FILE.unlink(missing_ok=True)         # мусор от упавшего — чистим
     fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     os.write(fd, str(os.getpid()).encode())
     os.close(fd)
