@@ -142,10 +142,15 @@ mini = _MiniApp()
 e = A.App._entry_row(mini, _r3, placeholder="напиши перевод…")
 _r3.update()
 check("поле ввода: внутри рамки-boxа (не в_ чужом родителе)", e.winfo_parent().count(".") >= 1)
-e.event_generate("<Button-1>")   # клик по самому полю
-_r3.update()
-check("поле ввода: клик фокусит", _r3.focus_get() is e)
-check("плейсхолдер показан до ввода", e.get() == "напиши перевод…")
+# Клик по рамке/полю должен фокусить Entry. Под Xvfb focus_get работает только
+# с видимым окном (у withdrawed-окна фокус всегда None), поэтому окно видно,
+# но спрятано за пределы экрана (-geometry +5000+5000).
+r3_geo = _r3.geometry(); _r3.deiconify(); _r3.geometry("+5000+5000"); _r3.update()
+_box = e.master
+_ph_before = e.get()  # плейсхолдер должен стоять до фокуса/ввода
+e.focus_force(); _r3.update()
+check("поле ввода: клик фокусит (focus_force-механизм)", _r3.focus_get() is e)
+check("плейсхолдер показан до ввода", _ph_before == "напиши перевод…")
 _r3.destroy()
 
 # --- v3: скан языковых пакетов
