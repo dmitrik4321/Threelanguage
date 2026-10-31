@@ -3,20 +3,39 @@
 stdlib-only (urllib), чтобы десктоп-билд не требовал requests. Протокол —
 ровно эндпоинты локального сервера: /api/auth/*, /api/sync/*, /api/stats.
 Все сетевые ошибки возвращаются строкой, не исключением — UI живёт без сети.
+
+Порты: основной 8765; если он занят чужим процессом (например, docker-стеком
+на 8000 или висящей копией), local_server/server.py автоматически уходит на
+следующий свободный и пишет фактический порт в файл ~/.threelanguage/
+server_port. Клиент читает этот файл и перебирает кандидаты сам — «запустил
+сервер, а приложение его не видит» больше невозможно.
 """
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 
-DEFAULT_BASE = "http://127.0.0.1:8765"
+PORT_FILE = os.path.join(os.path.expanduser("~"), ".threelanguage", "server_port")
+DEFAULT_PORT = 8765
+CANDIDATE_PORTS = [DEFAULT_PORT, 8766, 8767, 8768]
 TIMEOUT = 4.0
 
 
+def _port_from_file() -> int | None:
+    try:
+        with open(PORT_FILE) as f:
+            p = int(f.read().strip())
+        return p if 1 <= p < 65536 else None
+    except Exception:
+        return None
+
+
 class SyncClient:
-    def __init__(self, base: str = DEFAULT_BASE):
-        self.base = base.rstrip("/")
+    def __init__(self, base: str | None = None):
+        self._explicit = base is not None
+        self.base = (base or f"http://127.0.0.1:{_port_from_file() or DEFAULT_PORT}").rstrip("/")
         self.token: str | None = None
         self.username: str | None = None
 
@@ -41,8 +60,28 @@ class SyncClient:
 
     # ---- auth
     def health(self) -> bool:
-        st, _ = self._req("GET", "/health")
-        return st == 200
+        """Наш ли сервер доступен; при сбое перебрать порты-кандидаты.
+
+        Отличаем «наш» сервер от чужого сервиса на том же порту по полю
+        app в ответе /health (защита от docker/импосторов).
+        """
+        if self._our_health():
+            return True
+        if not self._explicit:
+            pf = _port_from_file()
+            ports = ([pf] if pf else []) + CANDIDATE_PORTS
+            for p in ports:
+                base = f"http://127.0.0.1:{p}"
+                if base == self.base:
+                    continue
+                self.base = base
+                if self._our_health():
+                    return True
+        return False
+
+    def _our_health(self) -> bool:
+        st, j = self._req("GET", "/health")
+        return st == 200 and j.get("app") == "threelanguage-local"
 
     def register(self, username: str, password: str) -> tuple[bool, str]:
         st, j = self._req("POST", "/api/auth/register",
