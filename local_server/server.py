@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 try:
-    from flask import Flask, jsonify, request, render_template_string
+    from flask import Flask, jsonify, request, redirect, render_template_string
 except ImportError as e:  # pragma: no cover
     raise SystemExit("Нужен Flask: pip install flask") from e
 
@@ -42,7 +42,53 @@ PORT_FILE = Path.home() / ".threelanguage" / "server_port"
 LOCK_FILE = Path.home() / ".threelanguage" / "server.lock"
 HB_PATH = Path.home() / ".threelanguage" / "server_hb"
 PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
-ADMIN_TOKEN = os.environ.get("TL_ADMIN_TOKEN", "")  # пусто = без токена (localhost)
+# --------------------------------------------------------- админ-доступ ----
+# Учётные данные админки лежат в ФАЙЛЕ КОНФИГА В КОРНЕ репозитория:
+#   admin_credentials.json  ->  {"username": "admin", "password": "..."}
+# Сервер читает его при старте; если файла нет — создаёт сам с паролем по
+# умолчанию и предупреждает в консоли. TL_ADMIN_TOKEN задаётся через env и
+# полностью ПЕРЕКРЫВАЕТ файл (для тех, кому не хочется хранить пароль на диске).
+# Осознанно простая схема «файл + запрос пароля»: сервер слушает только
+# 127.0.0.1, угрозная модель локальная. Пароль сравнивается hmac.compare_digest.
+ADMIN_CREDS_PATH = Path(__file__).resolve().parent.parent / "admin_credentials.json"
+ADMIN_DEFAULT_USER = "admin"
+ADMIN_DEFAULT_PASS = "threelanguage-admin"
+
+
+def _load_admin_creds() -> tuple[str, str]:
+    """Читает admin_credentials.json; при отсутствии/битости — дефолт + запись файла."""
+    try:
+        cfg = json.loads(ADMIN_CREDS_PATH.read_text(encoding="utf-8"))
+        user = str(cfg.get("username") or ADMIN_DEFAULT_USER)
+        pw = str(cfg.get("password") or "")
+        if pw:
+            return user, pw
+    except (OSError, ValueError):
+        pass
+    cfg = {"username": ADMIN_DEFAULT_USER, "password": ADMIN_DEFAULT_PASS,
+           "_comment": "Локальный доступ к /admin. Меняй password под себя; "
+                       "сервер слушает только 127.0.0.1."}
+    try:
+        ADMIN_CREDS_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                                    encoding="utf-8")
+        print(f"[admin] Создан {ADMIN_CREDS_PATH.name}: "
+              f"{ADMIN_DEFAULT_USER}/{ADMIN_DEFAULT_PASS} — смени пароль!")
+    except OSError:
+        pass
+    return ADMIN_DEFAULT_USER, ADMIN_DEFAULT_PASS
+
+
+ADMIN_USER, ADMIN_PASSWORD = _load_admin_creds()
+ADMIN_TOKEN = os.environ.get("TL_ADMIN_TOKEN", "")  # env-оверрайд поверх файла
+ADMIN_SESSIONS: dict[str, float] = {}               # cookie-token -> expiry
+ADMIN_COOKIE = "tl_admin"
+ADMIN_TTL = 8 * 3600                               # сессия админки — 8 часов
+
+
+def _admin_logged_in() -> bool:
+    tok = request.cookies.get(ADMIN_COOKIE, "")
+    exp = ADMIN_SESSIONS.get(tok)
+    return bool(tok and exp and exp > time.time())
 
 
 def _pid_alive(pid: int) -> bool:
@@ -188,9 +234,14 @@ def current_user() -> sqlite3.Row | None:
 
 
 def require_admin():
-    if ADMIN_TOKEN and request.headers.get("X-Admin-Token") != ADMIN_TOKEN:
-        return jsonify({"error": "unauthorized"}), 401
-    return None
+    """Пускать в админку держателя TL_ADMIN_TOKEN (заголовок X-Admin-Token —
+    для скриптов) либо браузер с cookie-сессией после формы входа по паролю
+    из admin_credentials.json. Возвращает None (допуск) или "login" (показать вход)."""
+    if ADMIN_TOKEN and request.headers.get("X-Admin-Token") == ADMIN_TOKEN:
+        return None
+    if not ADMIN_TOKEN and _admin_logged_in():
+        return None
+    return "login"
 
 
 # ------------------------------------------------------------------ API
@@ -303,6 +354,7 @@ ADMIN_TMPL = """<!doctype html><html><head><meta charset="utf-8">
  .msg{color:#3ecf8e} .err{color:#ff6b6b}
 </style></head><body>
 <h1>&#128009; Threelanguage — локальная админ-панель</h1>
+<form method=post action=/admin/logout style=float:right><button style="background:#33415a;color:#e8edf5;border:0;padding:4px 10px;cursor:pointer">Выйти</button></form>
 <a href="/api/stats">API stats</a> · <a href="/health">health</a>
 
 <h2>Пользователи</h2>
@@ -346,8 +398,8 @@ async function saveExample(){
 @app.get("/admin")
 def admin():
     err = require_admin()
-    if err:
-        return err
+    if err:   # нет валидной сессии/токена — страница входа по паролю из конфига
+        return login_page(), 401
     with db() as con:
         users = []
         for u in con.execute("SELECT * FROM users ORDER BY id"):
@@ -371,6 +423,59 @@ def admin():
                                pretty=pretty[:4000]))
     example = json.dumps(DEFAULT_EXAMPLE, ensure_ascii=False, indent=2)
     return render_template_string(ADMIN_TMPL, users=users, states=states, example=example)
+
+
+# ------------------------------------------------------ страница входа ----
+LOGIN_TMPL = """<!doctype html><html><head><meta charset="utf-8">
+<title>Threelanguage · вход в админку</title>
+<style>
+ body{background:#141a26;color:#e8edf5;font-family:monospace;display:flex;
+      justify-content:center;align-items:center;min-height:90vh;margin:0}
+ .card{background:#1d2534;border:1px solid #33415a;padding:28px 34px;width:320px}
+ h1{font-size:17px;margin:0 0 6px} p{font-size:12px;color:#93a1b5;margin:0 0 18px}
+ label{display:block;font-size:11px;color:#93a1b5;margin:10px 0 4px}
+ input{width:100%;box-sizing:border-box;background:#141a26;color:#e8edf5;
+       border:1px solid #33415a;padding:8px;font-family:monospace;font-size:13px}
+ button{margin-top:18px;width:100%;background:#ffb638;color:#241a05;border:0;
+        padding:9px;font-weight:bold;cursor:pointer;font-family:monospace}
+ .err{color:#ff6b6b;font-size:12px;margin-top:12px}
+</style></head><body>
+<form class=card method=post action=/admin/login>
+ <h1>&#128274; Threelanguage — админка</h1>
+ <p>Локальный сервер. Учётные данные — в admin_credentials.json (корень проекта).</p>
+ {% if bad %}<div class=err>Неверный логин или пароль.</div>{% endif %}
+ <label>Пользователь</label><input name=username autocomplete=username>
+ <label>Пароль</label><input name=password type=password autocomplete=current-password>
+ <button>Войти</button>
+</form></body></html>"""
+
+
+def login_page(bad: bool = False):
+    return render_template_string(LOGIN_TMPL, bad=bad)
+
+
+@app.post("/admin/login")
+def admin_login():
+    """Проверка формы входа против конфига; успех — cookie-сессия + редирект."""
+    form = request.form
+    ok_user = hmac.compare_digest(str(form.get("username", "")), ADMIN_USER)
+    ok_pass = hmac.compare_digest(str(form.get("password", "")), ADMIN_PASSWORD)
+    if not (ok_user and ok_pass):
+        return login_page(bad=True), 401
+    tok = secrets.token_hex(16)
+    ADMIN_SESSIONS[tok] = time.time() + ADMIN_TTL
+    resp = redirect("/admin")
+    resp.set_cookie(ADMIN_COOKIE, tok, max_age=ADMIN_TTL, httponly=True, samesite="Lax")
+    print(f"[client=admin] login ok user={ADMIN_USER}", flush=True)
+    return resp
+
+
+@app.post("/admin/logout")
+def admin_logout():
+    ADMIN_SESSIONS.pop(request.cookies.get(ADMIN_COOKIE, ""), None)
+    resp = redirect("/admin")
+    resp.delete_cookie(ADMIN_COOKIE)
+    return resp
 
 
 @app.get("/health")
