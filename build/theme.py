@@ -5,17 +5,25 @@
 """
 from __future__ import annotations
 
-# ---- палитра --------------------------------------------------------------
-BG        = "#141a26"   # фон окна
-PANEL     = "#1d2534"   # карточки/панели
-PANEL_HI  = "#263145"   # ховер/акцент панели
-TEXT      = "#e8edf5"   # основной текст
-TEXT_DIM  = "#93a1b5"   # вторичный текст
-ACCENT    = "#ffb638"   # янтарный акцент (дракон)
-GREEN     = "#3ecf8e"   # верно
-RED       = "#ff6b6b"   # неверно / АФК
-BLUE      = "#5aa7ff"   # инфо
-BORDER    = "#33415a"
+# ---- палитры: тёмная по умолчанию + светлая ------------------------------
+THEMES = {
+    "dark": dict(BG="#141a26", PANEL="#1d2534", PANEL_HI="#263145", TEXT="#e8edf5",
+                 TEXT_DIM="#93a1b5", ACCENT="#ffb638", GREEN="#3ecf8e", RED="#ff6b6b",
+                 BLUE="#5aa7ff", BORDER="#33415a"),
+    "light": dict(BG="#f2f4f8", PANEL="#ffffff", PANEL_HI="#e3e8f0", TEXT="#1c2430",
+                  TEXT_DIM="#5d6b80", ACCENT="#e09a17", GREEN="#1f9d63", RED="#d64545",
+                  BLUE="#2f6fd0", BORDER="#c3ccda"),
+}
+
+BG = PANEL = PANEL_HI = TEXT = TEXT_DIM = ACCENT = GREEN = RED = BLUE = BORDER = ""
+
+
+def set_theme(name: str):
+    """Переключает модульные цвета; вызывается ДО построения UI и при смене темы."""
+    global BG, PANEL, PANEL_HI, TEXT, TEXT_DIM, ACCENT, GREEN, RED, BLUE, BORDER
+    p = THEMES.get(name, THEMES["dark"])
+    g = globals()
+    g.update(p)
 
 LANG_COLORS = {"en": "#5aa7ff", "pt-BR": "#3ecf8e", "zh": "#ff6b6b"}
 
@@ -50,3 +58,6 @@ TXT = {
     "sleep":   "Дракон уснул… Пауза не учитывается.",
     "welcome": "Три языка, один дракон.",
 }
+
+
+set_theme("dark")

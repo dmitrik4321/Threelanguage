@@ -1,0 +1,7 @@
+{"type": "app_ui", "code": "en", "name": "English",
+ "strings": {"welcome": "Three languages, one dragon.", "start_lesson": "▶  Start lesson",
+ "placement": "Take placement test", "settings": "Settings", "login": "Sign in",
+ "register": "Register", "sync_now": "Sync now", "correct": "Correct! 🎉",
+ "wrong": "Wrong. The card will come back sooner.", "partial": "Almost! Small typo forgiven.",
+ "afk": "Too slow — the pace monitor counts this as AFK.",
+ "sleep": "The dragon fell asleep… Pause is not counted."}}

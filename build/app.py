@@ -24,7 +24,11 @@ import sys
 import time
 from pathlib import Path
 import tkinter as tk
-from tkinter import Entry, Frame, Label, Tk
+from tkinter import Entry, Frame, Label, Tk, ttk
+try:                                     # опционально: перетаскивание PNG-маскоты
+    from tkinterdnd2 import TkinterDnD   # pip install tkinterdnd2
+except Exception:
+    TkinterDnD = None
 
 ROOT = Path(__file__).resolve().parent.parent          # корень репозитория
 sys.path.insert(0, str(ROOT / "shared" / "algorithm"))  # эталон ядра
@@ -32,8 +36,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import reference as core                                 # noqa: E402
 import theme as T                                        # noqa: E402
+
+TXT_RU = {
+    "correct": "Верно! 🎉",
+    "partial": "Почти! Мелкая опечатка прощена.",
+    "wrong":   "Неверно. Карточка вернётся быстрее.",
+    "afk":     "Слишком медленно — темп-монитор списывает это как АФК.",
+    "sleep":   "Дракон уснул… Пауза не учитывается.",
+    "welcome": "Три языка, один дракон.",
+}
 from content import LESSON, PLACEMENT_ITEMS              # noqa: E402
-from widgets import Card, Dragon, LangBar, PillButton, Toast  # noqa: E402
+from widgets import (Card, Dragon, LangBar, MOOD_TO_PNG, PillButton,
+                     Toast)  # noqa: E402
+import packs as packscan                            # noqa: E402
+from sync_client import SyncClient                   # noqa: E402
 
 DB_PATH = Path.home() / ".threelanguage" / "desktop.db"
 LANG_NAMES = {"en": "English", "pt-BR": "Português", "zh": "中文"}
@@ -71,7 +87,17 @@ def default_state() -> dict:
         "history": [],                                # [{lesson, score, ts, n}]
         "placement_done": False,
         "level": None,
+        "settings": {"theme": "dark", "ui_lang": "ru"},
+        "account": {"username": None, "token": None},
     }
+
+
+def ensure_settings(st: dict) -> dict:
+    st.setdefault("settings", {"theme": "dark", "ui_lang": "ru"})
+    st["settings"].setdefault("theme", "dark")
+    st["settings"].setdefault("ui_lang", "ru")
+    st.setdefault("account", {"username": None, "token": None})
+    return st
 
 
 def roll_day(st: dict):
@@ -90,9 +116,18 @@ class App:
         tk_root.minsize(T.MIN_W, T.MIN_H)
         tk_root.configure(bg=T.BG)
 
-        self.st = load_state()
+        self.st = ensure_settings(load_state())
         roll_day(self.st)
         self.pace = core.PaceStats(**self.st["pace"])
+
+        # ---- тема/локаль из настроек (до построения UI)
+        self.strings: dict = {}
+        self.sync = SyncClient()
+        acct = self.st.get("account", {})
+        if acct.get("token"):
+            self.sync.token, self.sync.username = acct["token"], acct.get("username")
+        self.apply_theme(self.st["settings"]["theme"])
+        self.load_strings(self.st["settings"]["ui_lang"])
 
         # ---- layout: сайдбар | контент, снизу тост
         self.sidebar = self._build_sidebar(tk_root)
@@ -127,6 +162,24 @@ class App:
         self.schedule_idle_check()
         self.schedule_blink()
 
+    # ------------------------------------------------------ тема / локаль
+    def apply_theme(self, name: str):
+        T.set_theme(name)
+        try:
+            self.tk.configure(bg=T.BG)
+        except Exception:
+            pass
+
+    def load_strings(self, code: str):
+        """Строки из языкового пакета app_ui; встроенный русский — fallback."""
+        base = dict(TXT_RU)
+        base.update(packscan.strings_for(code))
+        self.strings = base
+        T.TXT = base
+
+    def tr(self, key: str) -> str:
+        return self.strings.get(key, TXT_RU.get(key, key))
+
     # ------------------------------------------------------ sidebar
     def _build_sidebar(self, root):
         sb = Card(root)
@@ -137,11 +190,19 @@ class App:
 
         Label(inner, text="🐉 Threelanguage", bg=T.PANEL, fg=T.ACCENT,
               font=T.font(15, "bold")).pack(anchor="w")
-        Label(inner, text=T.TXT["welcome"], bg=T.PANEL, fg=T.TEXT_DIM,
+        Label(inner, text=self.tr("welcome"), bg=T.PANEL, fg=T.TEXT_DIM,
               font=T.FS_SMALL).pack(anchor="w", pady=(0, 10))
 
         self.dragon = Dragon(inner, size=120)
         self.dragon.pack(pady=(0, 12))
+        self._dragon_dnd = hasattr(self.tk, 'register')  # tkdnd доступен?
+        if self._dragon_dnd:
+            try:
+                self.dragon.register('*')
+                self.dragon.drop_target_register('*')
+                self.dragon.dnd_bind('<<Drop>>', self._on_mascot_drop)
+            except Exception:
+                self._dragon_dnd = False
 
         self.level_lbl = Label(inner, text="", bg=T.PANEL, fg=T.TEXT, font=T.FS_BODY)
         self.level_lbl.pack(anchor="w", pady=(0, 10))
@@ -162,6 +223,19 @@ class App:
         self.streak_lbl = Label(inner, text="", bg=T.PANEL, fg=T.TEXT_DIM, font=T.FS_SMALL)
         self.streak_lbl.pack(anchor="w", pady=(14, 0))
         return sb
+
+    def _on_mascot_drop(self, event):
+        """PNG-маскоту можно перетащить на дракона — смена настроения по имени."""
+        from pathlib import Path as P
+        p = P(event.data.strip("{} "))
+        if p.suffix.lower() == ".png":
+            stem = p.stem
+            for mood, name in MOOD_TO_PNG.items():
+                if name in stem:
+                    self.dragon.set_mood(mood)
+                    break
+            self.dragon.load_external(p)
+            self.toast.show(f"Маскота: {p.name}", T.GREEN)
 
     def update_dashboard(self):
         roll_day(self.st)
@@ -205,7 +279,7 @@ class App:
               bg=T.PANEL, fg=T.TEXT_DIM, font=T.FS_BODY, justify="left").pack(pady=(0, 24))
 
         if self.st["placement_done"]:
-            PillButton(inner, "▶  Начать урок", command=self.start_lesson,
+            PillButton(inner, self.tr("start_lesson"), command=self.start_lesson,
                        width=280, height=52, color=T.GREEN, hover="#54e0a4",
                        fg="#0d1b14").pack(pady=5)
             PillButton(inner, "Пройти placement заново", command=self.start_placement,
@@ -214,6 +288,13 @@ class App:
             PillButton(inner, "▶  Placement-тест (~2 минуты)", command=self.start_placement,
                        width=280, height=52, color=T.ACCENT, hover="#ffc866",
                        fg="#241a05").pack(pady=5)
+        row = Frame(inner, bg=T.PANEL); row.pack(pady=(10, 0))
+        PillButton(row, "⚙  Настройки", command=self.show_settings, width=170,
+                   height=38).pack(side="left", padx=4)
+        acct_lbl = Label(inner, text=("👤 " + str(self.sync.username)) if self.sync.token
+                         else "Аккаунт: локальный режим (вход в Настройках)",
+                         bg=T.PANEL, fg=T.TEXT_DIM, font=T.FS_SMALL)
+        acct_lbl.pack(pady=(12, 0))
         hist = self.st["history"][-3:]
         if hist:
             txt = "Последние: " + " · ".join(f"{h['score']}/100" for h in hist)
@@ -232,7 +313,7 @@ class App:
                 self._dimmed = True
                 self.task_events.append((int(idle), "focus_out"))
                 self.dragon.set_mood("sleep")
-                self.toast.show(T.TXT["sleep"], T.BLUE, ms=4000)
+                self.toast.show(self.tr("sleep"), T.BLUE, ms=4000)
         self._idle_job = self.tk.after(2000, self._idle_tick)
 
     def schedule_blink(self):
@@ -247,6 +328,31 @@ class App:
             self.dragon.set_mood("idle")
         self.task_events.append((now_rel, "input"))
         self.last_input_t = time.time()
+
+    def _entry_row(self, parent, *, placeholder=""):
+        """Поле ввода в рамке-карточке: кликабельно (клик по рамке фокусит поле),
+        видимый border, курсор I-beam. Возвращает Entry."""
+        box = Frame(parent, bg=T.BG, highlightbackground=T.BORDER, highlightthickness=2,
+                    cursor="xterm")
+        box.pack(padx=40, pady=6, fill="x")
+        e = Entry(box, font=T.FS_TITLE, bg=T.BG, fg=T.TEXT,
+                  insertbackground=T.TEXT, relief="flat", bd=0,
+                  disabledbackground=T.PANEL)
+        e.pack(fill="x", padx=12, pady=9)
+        box.bind("<Button-1>", lambda ev: (e.focus_force(),))
+        if placeholder:
+            def _ph_show(_=None):
+                if not e.get():
+                    e.insert(0, placeholder)
+                    e.config(fg=T.TEXT_DIM)
+            def _ph_hide(_=None):
+                if e.get() == placeholder:
+                    e.delete(0, "end"); e.config(fg=T.TEXT)
+            e.bind("<FocusIn>", _ph_hide)
+            e.bind("<FocusOut>", _ph_show)
+            e.bind("<KeyRelease>", lambda ev: None)  # no-op, порядок биндов важен
+            _ph_show()
+        return e
 
     # ------------------------------------------------------ placement
     def start_placement(self):
@@ -279,11 +385,8 @@ class App:
                 b.pack(pady=4)
                 self._opt_buttons.append(b)
         else:
-            self.entry = Entry(c, font=T.FS_TITLE, bg=T.BG, fg=T.TEXT,
-                               insertbackground=T.TEXT, relief="flat", bd=0)
-            ef = Card(c); ef.pack(padx=40, pady=6, fill="x")
-            self.entry.pack(fill="x", padx=10, pady=8, in_=ef)
-            self.entry.focus_set()
+            self.entry = self._entry_row(c, placeholder="введи перевод…")
+            self.entry.focus_force()
             self.entry.bind("<Key>", lambda e: self.on_input())
             self.entry.bind("<Return>", lambda e: self._submit_placement_type())
             PillButton(c, "Проверить  ⏎", command=self._submit_placement_type,
@@ -293,8 +396,12 @@ class App:
     def current_expected(self):
         return PLACEMENT_ITEMS[self._pl_idx]["expected"]
 
+    def typed_text(self) -> str:
+        v = self.entry.get()
+        return "" if v in ("введи перевод…", "напиши перевод…") else v
+
     def _submit_placement_type(self):
-        credit = core.partial_credit(self.current_expected(), self.entry.get())
+        credit = core.partial_credit(self.current_expected(), self.typed_text())
         self.answer_placement(credit)
 
     def answer_placement(self, correct):
@@ -370,11 +477,8 @@ class App:
                 b.pack(pady=4)
                 self._opt_buttons.append(b)
         else:
-            self.entry = Entry(c, font=T.FS_TITLE, bg=T.BG, fg=T.TEXT,
-                               insertbackground=T.TEXT, relief="flat", bd=0)
-            ef = Card(c); ef.pack(padx=40, pady=6, fill="x")
-            self.entry.pack(fill="x", padx=10, pady=8, in_=ef)
-            self.entry.focus_set()
+            self.entry = self._entry_row(c, placeholder="напиши перевод…")
+            self.entry.focus_force()
             self.entry.bind("<Key>", lambda e: self.on_input())
             self.entry.bind("<Return>", lambda e: self.submit_type())
             PillButton(c, "Проверить  ⏎", command=self.submit_type, width=200,
@@ -401,7 +505,7 @@ class App:
             return
         self.on_input()
         t = self.current_task
-        self.record_answer(core.partial_credit(t["expected"], self.entry.get()))
+        self.record_answer(core.partial_credit(t["expected"], self.typed_text()))
 
     def save_now(self):
         self.st["pace"] = {"samples": self.pace.samples}
@@ -441,18 +545,18 @@ class App:
         # ---- фидбек: подсветка + тост, затем следующее задание
         if afk_suspect:
             self.dragon.set_mood("angry")
-            self.toast.show(T.TXT["afk"] + f" Вес задания: {weight/1000:.1f} с.", T.RED)
+            self.toast.show(self.tr("afk") + f" Вес задания: {weight/1000:.1f} с.", T.RED)
         elif correct >= 0.999:
             self.dragon.set_mood("cheer")
             due_d = (newcard.due_ms - now_ms) / 86_400_000
-            self.toast.show(f"{T.TXT['correct']} Повтор через {due_d:.1f} дн.", T.GREEN)
+            self.toast.show(f"{self.tr('correct')} Повтор через {due_d:.1f} дн.", T.GREEN)
             self._highlight_right()
         elif correct > 0:
             self.dragon.set_mood("sad")
-            self.toast.show(T.TXT["partial"] + f" ({correct:.0%})", T.ACCENT)
+            self.toast.show(self.tr("partial") + f" ({correct:.0%})", T.ACCENT)
         else:
             self.dragon.set_mood("sad")
-            self.toast.show(T.TXT["wrong"], T.RED)
+            self.toast.show(self.tr("wrong"), T.RED)
         if correct < 0.5 and not afk_suspect:
             self._mark_wrong_choice()
 
@@ -542,9 +646,193 @@ class App:
         self.start_lesson()
         return "break"
 
+    # ------------------------------------------------------ настройки v3
+    def show_settings(self):
+        self.mode = "settings"
+        self.clear_content()
+        c = Card(self.content)
+        c.pack(fill="both", expand=True)
+        Label(c, text="⚙  Настройки", bg=T.PANEL, fg=T.TEXT,
+              font=T.FS_TITLE).pack(anchor="w", padx=20, pady=(16, 8))
+
+        s = self.st["settings"]
+
+        # ---- тема (реальное переключение + рестарт UI)
+        row1 = Frame(c, bg=T.PANEL); row1.pack(fill="x", padx=20, pady=4)
+        Label(row1, text="Тема:", bg=T.PANEL, fg=T.TEXT_DIM, font=T.FS_BODY).pack(side="left")
+        for name, lbl in (("dark", "🌙 Тёмная"), ("light", "☀ Светлая")):
+            cur = s.get("theme", "dark") == name
+            PillButton(row1, ("● " if cur else "○ ") + lbl, width=150, height=36,
+                       color=T.GREEN if cur else T.PANEL_HI,
+                       command=lambda n=name: self._set_theme(n)).pack(side="left", padx=4)
+
+        # ---- язык приложения (скан lang_packs/app_ui)
+        row2 = Frame(c, bg=T.PANEL); row2.pack(fill="x", padx=20, pady=4)
+        Label(row2, text="Язык интерфейса:", bg=T.PANEL, fg=T.TEXT_DIM,
+              font=T.FS_BODY).pack(side="left")
+        ui_packs = packscan.scan_app_ui()
+        cb = ttk.Combobox(row2, state="readonly", width=18,
+                          values=[f"{p['name']} ({p['code']})" for p in ui_packs] or ["ru"])
+        sel = next((i for i, p in enumerate(ui_packs)
+                    if p["code"] == s.get("ui_lang", "ru")), 0)
+        if ui_packs:
+            cb.current(sel)
+            cb.pack(side="left", padx=6)
+            cb.bind("<<ComboboxSelected>>",
+                    lambda e: self._set_ui_lang(ui_packs[cb.current()]["code"]))
+        else:
+            Label(row2, text="пакеты не найдены (lang_packs/app_ui)", bg=T.PANEL,
+                  fg=T.RED, font=T.FS_SMALL).pack(side="left")
+        PillButton(row2, "↻ Обновить список", width=150, height=32,
+                   command=self.show_settings).pack(side="left", padx=6)
+
+        # ---- пакеты изучения (study: «язык из языка»)
+        row2b = Frame(c, bg=T.PANEL); row2b.pack(fill="x", padx=20, pady=4)
+        Label(row2b, text="Пакеты для изучения:", bg=T.PANEL, fg=T.TEXT_DIM,
+              font=T.FS_BODY).pack(side="left")
+        study = packscan.scan_study()
+        names = ", ".join(p.get("name", p["_path"]) for p in study) or "—"
+        Label(row2b, text=f"{len(study)} шт · {names} (заглушка)", bg=T.PANEL,
+              fg=T.TEXT, font=T.FS_SMALL).pack(side="left", padx=6)
+
+        # ---- аккаунт / вход-регистрация
+        auth = Card(c); auth.pack(fill="x", padx=20, pady=10)
+        online = self.sync.health()
+        who = f" · 👤 {self.sync.username}" if self.sync.token else ""
+        Label(auth, text=("Сервер: http://127.0.0.1:8765 — "
+                         + ("в сети ✓" if online else "недоступен ✗ (запусти local_server/server.py)")
+                         + who),
+              bg=T.PANEL, fg=T.GREEN if online else T.RED, font=T.FS_SMALL).pack(anchor="w", padx=10, pady=(8, 2))
+        fr = Frame(auth, bg=T.PANEL); fr.pack(fill="x", padx=6, pady=4)
+        self._acc_user = self._entry_row(fr, placeholder="логин")
+        self._acc_pass = self._entry_row(fr, placeholder="пароль")
+        br = Frame(auth, bg=T.PANEL); br.pack(pady=6)
+        PillButton(br, self.tr("register"), width=140, height=36, color=T.ACCENT,
+                   hover="#ffc866", fg="#241a05", command=self._do_register).pack(side="left", padx=4)
+        PillButton(br, self.tr("login"), width=140, height=36, color=T.BLUE,
+                   hover="#7dbcff", command=self._do_login).pack(side="left", padx=4)
+        if self.sync.token:
+            PillButton(br, "Выход", width=110, height=36,
+                       command=self._do_logout).pack(side="left", padx=4)
+
+        # ---- сбросы
+        row3 = Frame(c, bg=T.PANEL); row3.pack(fill="x", padx=20, pady=8)
+        PillButton(row3, "Сбросить скорость (темп-медианы)", width=280, height=40,
+                   color=T.RED, hover="#ff9494", fg="#2a0d0d",
+                   command=self._reset_pace).pack(side="left", padx=4)
+        PillButton(row3, "Сбросить весь прогресс", width=220, height=40,
+                   color=T.RED, hover="#ff9494", fg="#2a0d0d",
+                   command=self._reset_progress).pack(side="left", padx=4)
+
+        # ---- синхронизация
+        row4 = Frame(c, bg=T.PANEL); row4.pack(fill="x", padx=20, pady=(2, 10))
+        PillButton(row4, "⇧ " + self.tr("sync_now") + " (push)", width=190, height=38,
+                   color=T.GREEN, hover="#54e0a4", fg="#0d1b14",
+                   command=self._do_push).pack(side="left", padx=4)
+        PillButton(row4, "⇩ Затянуть (pull)", width=180, height=38,
+                   command=self._do_pull).pack(side="left", padx=4)
+        PillButton(row4, "← Домой", width=120, height=38,
+                   command=self.show_home).pack(side="left", padx=4)
+
+    # ---- обработчики настроек
+    def _restart_ui(self):
+        for w in self.sidebar.winfo_children():
+            w.destroy()
+        self.sidebar = self._build_sidebar(self.tk)
+        self.sidebar.pack(side="left", fill="y", padx=(T.PAD, 0), pady=T.PAD)
+        self.update_dashboard()
+
+    def _set_theme(self, name: str):
+        self.st["settings"]["theme"] = name
+        self.apply_theme(name)
+        self.save_now()
+        self._restart_ui()
+        self.show_settings()
+        self.toast.show(f"Тема: {name}", T.BLUE)
+
+    def _set_ui_lang(self, code: str):
+        self.st["settings"]["ui_lang"] = code
+        self.load_strings(code)
+        self.save_now()
+        self._restart_ui()
+        self.show_settings()
+        self.toast.show(f"Язык интерфейса: {code}")
+
+    def _auth_fields(self):
+        u, p = self._acc_user.get(), self._acc_pass.get()
+        if u == "логин":
+            u = ""
+        if p == "пароль":
+            p = ""
+        return u.strip().lower(), p
+
+    def _store_account(self):
+        self.st["account"] = {"username": self.sync.username, "token": self.sync.token}
+        self.save_now()
+
+    def _do_register(self):
+        ok, msg = self.sync.register(*self._auth_fields())
+        if ok:
+            self._store_account()
+        self.toast.show("Регистрация: " + msg, T.GREEN if ok else T.RED)
+        self.show_settings()
+
+    def _do_login(self):
+        ok, msg = self.sync.login(*self._auth_fields())
+        if ok:
+            self._store_account()
+        self.toast.show(msg, T.GREEN if ok else T.RED)
+        self.show_settings()
+
+    def _do_logout(self):
+        self.sync.logout()
+        self.st["account"] = {"username": None, "token": None}
+        self.save_now()
+        self.show_settings()
+
+    def _do_push(self):
+        if not self.sync.token:
+            self.toast.show("Сначала войди или зарегистрируйся", T.ACCENT)
+            return
+        self.save_now()
+        ok, msg = self.sync.push_state(self.st)
+        self.toast.show("Push: " + msg, T.GREEN if ok else T.RED)
+
+    def _do_pull(self):
+        if not self.sync.token:
+            self.toast.show("Сначала войди или зарегистрируйся", T.ACCENT)
+            return
+        st, msg = self.sync.pull_state()
+        if st:
+            self.st = ensure_settings(st)
+            self.pace = core.PaceStats(**self.st["pace"])
+            roll_day(self.st)
+            self.save_now()
+            self._restart_ui()
+            self.show_home()
+            self.toast.show("Pull: состояние загружено с сервера", T.GREEN)
+        else:
+            self.toast.show("Pull: " + msg, T.RED)
+
+    def _reset_pace(self):
+        """Сброс темпа: pace_samples обнуляются (docs/AFK.md — медиана заново)."""
+        self.pace.samples = {}
+        self.st["pace"] = {"samples": {}}
+        self.save_now()
+        self.toast.show("Темп-статистика сброшена", T.BLUE)
+
+    def _reset_progress(self):
+        """Полный сброс: SRS-карточки, история, placement, минуты."""
+        self.st = ensure_settings(default_state())
+        self.pace = core.PaceStats(**self.st["pace"])
+        save_state(self.st)
+        self._restart_ui()
+        self.show_home()
+        self.toast.show("Прогресс сброшен", T.RED)
+
 
 def main():
-    root = Tk()
+    root = TkinterDnD.Tk() if TkinterDnD else Tk()
     App(root)
     root.mainloop()
 
