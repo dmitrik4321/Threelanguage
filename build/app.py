@@ -697,11 +697,13 @@ class App:
 
         # ---- аккаунт / вход-регистрация
         auth = Card(c); auth.pack(fill="x", padx=20, pady=10)
+        self._ensure_server()                     # автоподнятие локального сервера
         online = self.sync.health()
         who = f" · 👤 {self.sync.username}" if self.sync.token else ""
-        Label(auth, text=("Сервер: http://127.0.0.1:8765 — "
-                         + ("в сети ✓" if online else "недоступен ✗ (запусти local_server/server.py)")
-                         + who),
+        port = self.sync.base.rsplit(":", 1)[-1]
+        state_lbl = ("в сети ✓" if online else
+                     "недоступен ✗ (запусти: python3 local_server/server.py)")
+        Label(auth, text=(f"Сервер: {self.sync.base} — {state_lbl}" + who),
               bg=T.PANEL, fg=T.GREEN if online else T.RED, font=T.FS_SMALL).pack(anchor="w", padx=10, pady=(8, 2))
         fr = Frame(auth, bg=T.PANEL); fr.pack(fill="x", padx=6, pady=4)
         self._acc_user = self._entry_row(fr, placeholder="логин")
@@ -769,6 +771,46 @@ class App:
     def _store_account(self):
         self.st["account"] = {"username": self.sync.username, "token": self.sync.token}
         self.save_now()
+
+    def _ensure_server(self):
+        """Автоподнятие локального сервера синхронизации (главная жалоба:
+        «сервер падает / самозакрывается»).
+
+        Причина «самозакрытия» при запуске двойным кликом по .py на Windows —
+        консоль исчезает вместе с ошибкой. Поэтому приложение само запускает
+        local_server/server.py отдельным процессом (DETACHED на Windows),
+        ждёт /health и пишет лог в ~/.threelanguage/local_server.log — если
+        что-то не так, пользователь видит причину в тосте, а не мелькание окна.
+        """
+        import subprocess, sys, time, urllib.request
+        if self.sync.health():
+            return
+        server_py = Path(__file__).resolve().parent.parent / "local_server" / "server.py"
+        if not server_py.exists():
+            self.toast.show("local_server/server.py не найден — синхронизация офлайн", T.RED)
+            return
+        log_path = Path.home() / ".threelanguage" / "local_server.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(log_path, "ab") as logf:
+                kwargs = {}
+                if sys.platform == "win32":       # скрыть консоль, но процесс живёт
+                    kwargs = {"creationflags": 0x00000008 | 0x00000200}  # DETACHED | NO_WINDOW
+                else:
+                    kwargs = {"start_new_session": True}
+                subprocess.Popen([sys.executable, str(server_py)],
+                                 stdout=logf, stderr=logf, cwd=str(server_py.parent),
+                                 **kwargs)
+        except Exception as e:
+            self.toast.show(f"не удалось поднять сервер: {e}", T.RED)
+            return
+        for _ in range(25):                       # до 5 секунд ожидания
+            time.sleep(0.2)
+            if self.sync.health():
+                self.toast.show(f"локальный сервер поднят: {self.sync.base}", T.GREEN)
+                return
+        self.toast.show("сервер запущен, но /health не отвечает — смотри "
+                        f"~/.threelanguage/{log_path.name}", T.RED)
 
     def _do_register(self):
         ok, msg = self.sync.register(*self._auth_fields())

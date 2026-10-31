@@ -182,14 +182,33 @@ class Dragon(Frame):
         self.mood = "idle"
         self._blink = False
         self._photos: dict[tuple[str, int], object] = {}
+        self._keep_sprites: list = []
+        self._keep: list = []
+        # кропнутый по альфе спрайт (для пути B, когда ImageTk недоступен)
+        self._sprite_dir = Path(__import__("tempfile").gettempdir()) / "threelanguage_sprites"
+        self._sprite_dir.mkdir(exist_ok=True)
         self._img_id = None
         # фон для композита: canvas рисует поверх bg master'а — прозрачные PNG
         # пиксели должны совпадать с этим цветом, иначе на Windows/Tk8.6
         # вместо дракона остаются «осколки» предыдущего кадра (matted-артефакты)
         self._bg = _bg_of(master)
+        # «Подложка»: реальный фон рисуют ЧИСТЫЕ tk.PhotoImage поверх canvas-bg.
+        # На некоторых сборках Tk прозрачные пиксели put/zoom-изображений гасятся
+        # в чёрный — это и был «дракон наполовину из чёрных дыр». RGB-подложка +
+        # альфа-маска спрайта дают гарантированный композит без ImageTk.
+        # ВАЖНО: master=корневое окно. Без него Tk привязывает образ к первому
+        # корню в процессе; при переключении темы старый surface GC-ится и
+        # новый PhotoImage получает ТО ЖЕ имя pyimageN — Tk рисует мусор
+        # («уставший дракон», «разбросанные пиксели»).
         self._c = Canvas(self, width=size, height=size, bg=self._bg,
                          highlightthickness=0)
         self._c.pack(fill="both", expand=True)
+        top = self._c.winfo_toplevel()
+        self._surface = tk.PhotoImage(master=top, width=size, height=size)
+        self._surface.put(self._hex_to_tk(self._bg), to=(0, 0, size, size))
+        self._bg_img_id = self._c.create_image(size // 2, size // 2,
+                                               image=self._surface, tags="bg")
+        self._img_id = self._c.create_image(size // 2, size // 2, tags="fg")
         self.draw()
 
     def set_mood(self, mood: str):
@@ -202,69 +221,218 @@ class Dragon(Frame):
         self.draw()
 
     def draw(self):
-        self._c.delete("all")
+        # перекрасить подложку (тема могла смениться); fg-слой очищаем
+        self._surface.put(self._hex_to_tk(self._bg), to=(0, 0, self.size, self.size))
+        self._c.itemconfigure(self._img_id, image="")
         ext = getattr(self, "_external", None)
-        if ext and ("ext", self.size) in self._photos:
-            self._c.create_image(self.size // 2, self.size // 2,
-                                 image=self._photos[("ext", self.size)])
+        src = None
+        if ext and ("ext_img", self.size) in self._photos:
+            src = self._photos[("ext_img", self.size)]
+        else:
+            name = MOOD_TO_PNG.get(self.mood, "dragon_idle")
+            if Image is not None:
+                key = (name, self.size)
+                if key not in self._photos:
+                    p = _mascot_dir() / f"{name}.png"
+                    self._photos[key] = self._load_asset(p) if p.exists() else None
+                src = self._photos.get(key)
+        if src is not None:
+            if self._blit_sprite(src):
+                return                            # A: свой кадр; B: через surface
+            self._c.itemconfigure(self._img_id, image=self._surface)
             return
-        name = MOOD_TO_PNG.get(self.mood, "dragon_idle")
-        if Image is not None:
-            key = (name, self.size)
-            if key not in self._photos:
-                p = _mascot_dir() / f"{name}.png"
-                if p.exists():
-                    self._photos[key] = self._prepare_asset(p)
-            ph = self._photos.get(key)
-            if ph is not None:
-                self._img_id = self._c.create_image(self.size // 2, self.size // 2,
-                                                    image=ph)
-                return
-        self._placeholder()
+        self._placeholder()                       # без Pillow/ассетов: красная заглушка
 
-    def _prepare_asset(self, path):
-        """PNG-ассет → PhotoImage с ЧИСТОЙ геометрией.
+    @staticmethod
+    def _hex_to_tk(hexc: str) -> str:
+        """'#rrggbb' → строка для PhotoImage.put (заливка региона одним цветом)."""
+        return " " + (hexc if hexc.startswith("#") else "#141a26")
 
-        Что починено по фидбеку «половина пикселей разбросана хрен пойми как»:
-          1. Обрезка по alpha-bbox: в исходных спрайтах вокруг дракона мусорные
-             одинокие пиксельные группы («разбросанные»), после кропа остаётся
-             только сам спрайт.
-          2. Масштабирование целочисленным NEAREST (zoom/subsample), а не
-             thumbnail дробным коэффициентом — дробный NEAREST на пиксель-арте
-             делает неравномерные строки/столбцы (тот самый «рваный» вид).
-          3. Композит поверх реального фона Canvas вместо RGBA-прозрачности:
-             Tk PhotoImage не умеёт альфу, и на Windows полупрозрачные пиксели
-             рендерились случайными артефактами.
+    def _blit_sprite(self, img) -> bool:
+        """Спрайт RGBA -> композит поверх фона темы.
+
+        История багов «дракон наполовину из дыр / пиксели вразброс / уставший»:
+          1) join(... None ...) падал TypeError на любом PNG с прозрачностью;
+          2) x0 = index('#')//7 по сдвинутой строке — каждый прозрачный пиксель
+             сдвигал ряд;
+          3) слитный ряд '#rrggbb#rrggbb' Tcl не парсит (can't parse color) —
+             между цветами ОБЯЗАТЕЛЬНЫ пробелы;
+          4) ImageTk без Tk-компиляции Pillow кидает RuntimeError — ошибка
+             захватывалась молча, и рисовался битый запасной путь;
+          5) ГЛАВНЫЙ баг v5: PIL.Image был доступен, а PIL.ImageTk — нет
+             (Pillow собран без поддержки Tk). Виджет возвращал False из blit,
+             вызывающий код делал itemconfigure(image=self._surface) — то есть
+             на канвасе оставалась ОДНА СПЛОШНАЯ ЗАЛИВКА ФОНOM, а сам дракон не
+             рисовался никогда. Отсюда «уставший дракон» и «пустая плашка».
+        Правильный ответ без ImageTk: tk.PhotoImage умеет читать PNG САМ
+        (включая альфу) и красит её цветом -background — фон темы подставляется
+        нативно, без ручного побайтового blit. Плюс keep-ссылка против GC.
         """
+        w, h = img.size
+        if w > self.size or h > self.size:
+            return False
+        ox, oy = (self.size - w) // 2, (self.size - h) // 2
+        # путь A: Pillow композит + ImageTk (если сборка Pillow с Tk)
+        if ImageTk is not None:
+            try:
+                br, bgc, bb = self._bg_rgb()
+                comp = Image.new("RGB", (self.size, self.size), (br, bgc, bb))
+                comp.paste(img, (ox, oy), img)
+                ph = ImageTk.PhotoImage(comp, master=self._c.winfo_toplevel())
+                self._c.itemconfigure(self._img_id, image=ph)
+                self._keep.append(ph)
+                self._render_path = "ImageTk"
+                return True
+            except Exception as e:
+                self._imagetk_error = f"{type(e).__name__}: {e}"
+        else:
+            self._imagetk_error = "ImageTk не импортируется (Pillow без Tk)"
+        # путь B: tk.PhotoImage(file=...) — Tk сам читает PNG и сам смешивает
+        # альфу с -background. Никаких put/zoom/row-shifting артефактов.
+        # ВАЖНО: сначала кроп по alpha-bbox (в исходниках 256x256 дракон занимает
+        # ~70% кадра; без кропа subsample даёт крошечный «уставший» спрайт).
+        name = MOOD_TO_PNG.get(self.mood, "dragon_idle")
+        p = _mascot_dir() / f"{name}.png"
+        if getattr(self, "_external", None):
+            p = Path(self._external)
+        if Image is not None and img is not None:
+            br, bgc, bb = self._bg_rgb()
+            key = f"crop_{name}_{self.size}_{br:x}_{bgc:x}_{bb:x}"
+            cropped = self._sprite_dir / f"{key}.png"
+            if not cropped.exists():
+                # композит БЕЗ альфы: спрайт на фоне темы. Tk PhotoImage
+                # не умеет альфу PNG и гасит прозрачные пиксели в ЧЁРНЫЙ —
+                # это и были «чёрные дыры/уставший вид». Здесь альфа уже
+                # смешана Pillow'ом, у Tk нет повода что-то гасить.
+                comp = Image.new("RGB", img.size, (br, bgc, bb))
+                comp.paste(img, (0, 0), img)
+                tmp = cropped.with_suffix(".tmp.png")
+                comp.save(tmp); tmp.replace(cropped)   # атомарно против гонок
+            p = cropped
+        if p.exists():
+            try:
+                ph = tk.PhotoImage(file=str(p), master=self._c.winfo_toplevel())
+                m = max(ph.width(), ph.height())
+                target = max(8, self.size - 4)
+                if m > target:                    # целочисленный subsample
+                    s = -(-m // target)
+                    ph = ph.subsample(s, s)
+                elif m <= target // 2:            # целочисленный zoom
+                    k = max(1, target // m)
+                    ph = ph.zoom(k, k)
+                self._c.itemconfigure(self._img_id, image=ph)
+                self._keep.append(ph)
+                self._render_path = "tk.PhotoImage"
+                return True
+            except Exception as e:
+                self._photo_load_error = f"{type(e).__name__}: {e}"
+        return False
+
+    def _placeholder(self):
+        """Без рабочего ImageTk: грузим PNG НАПРЯМУЮ через tk.PhotoImage —
+        Tk сам читает RGBA и свою альфу, никаких put/zoom-артефактов.
+        Это замена прежнему ручному побайтовому blit, который и рисовал
+        «разбросанные полупиксели»."""
+        name = MOOD_TO_PNG.get(self.mood, "dragon_idle")
+        key = ("tk_" + name, self.size)
+        if key not in self._photos:
+            p = _mascot_dir() / f"{name}.png"
+            ph = None
+            if p.exists():
+                try:
+                    ph = tk.PhotoImage(file=str(p))
+                    # целочисленный zoom/subsample только по максимуму стороны
+                    m = max(ph.width(), ph.height())
+                    target = max(8, self.size - 4)
+                    if m <= target // 2:
+                        k = max(1, target // m)
+                        ph = ph.zoom(k, k)
+                    elif m > target:
+                        s = -(-m // target)
+                        ph = ph.subsample(s, s)
+                except Exception:
+                    ph = None
+            self._photos[key] = ph
+        ph = self._photos.get(key)
+        if ph is not None:
+            self._c.itemconfigure(self._img_id, image=ph)
+            return
+        # совсем без ассетов: красная пиксельная рыбка-заглушка (не зелёная!)
+        c = self._c
+        red, dark = "#d02828", "#8c1a20"
+        body = [(x, y) for y in range(4, 9) for x in range(3, 12)]
+        for (x, y) in body:
+            c.create_rectangle(x * 8, y * 8, x * 8 + 8, y * 8 + 8,
+                               fill=red, outline="", tags="sprite")
+        c.create_rectangle(11 * 8, 5 * 8, 13 * 8, 7 * 8, fill=dark, outline="", tags="sprite")
+        c.create_oval(4 * 8, 5 * 8, 5 * 8 + 4, 6 * 8, fill="#fff", outline="", tags="sprite")
+
+    def _bg_rgb(self):
+        # hex -> напрямую; имя цвета Tk ('gray', 'systemButtonFace') -> winfo_rgb,
+        # на битом имени не падаем — берём тёмно-синий фон темы
+        b = (self._bg or "").lstrip("#")
+        if len(b) == 6:
+            try:
+                return (int(b[0:2], 16), int(b[2:4], 16), int(b[4:6], 16))
+            except ValueError:
+                pass
+        try:
+            rgb = self._c.winfo_toplevel().winfo_rgb(self._bg)
+            return tuple(c >> 8 for c in rgb)
+        except Exception:
+            return (0x14, 0x1A, 0x26)
+
+    def _load_asset(self, path):
+        """PNG → PIL RGBA в габарит виджета. ЦЕЛОЧИСЛЕННЫЙ NEAREST в обе стороны.
+
+        Фиксы «уставшего дракона» и «разбросанных пикселей»:
+          * раньше уменьшение шло round(w/sub) — дробная геометрия ломала ряды;
+            теперь ceil-габарит: после subsample сторона гарантированно <= target;
+          * спрайт никогда не рисуется больше canvas (проверка caller'ом);
+          * если PIL не смог привести к честному размеру — возвращаем None,
+            и рисуем через tk.PhotoImage(file=...), Tk читает PNG сам."""
         img = Image.open(path).convert("RGBA")
-        bbox = img.getbbox()                      # учитывает альфу у RGBA
+        bbox = img.getbbox()                      # обрезаем прозрачные поля
         if bbox:
             img = img.crop(bbox)
+        target = max(8, self.size - 4)
         w, h = img.size
-        target = self.size - 4
-        k = max(1, min(target // max(w, 1), target // max(h, 1)))
-        if k > 1:
-            img = img.resize((w * k, h * k), Image.NEAREST)   # целочисленное увеличение
-        elif (sx := min(target // w, target // h)) >= 1:      # целочисленное уменьшение
-            img = img.subsample(sx)
-        else:                                   # вписать нельзя целым числом — сглаживаем
-            img.thumbnail((target, target), Image.LANCZOS)
+        if max(w, h) > target:                    # уменьшение: ceil => точно влезет
+            sub = -(-max(w, h) // target)
+            img = img.resize((max(1, -(-w // sub)), max(1, -(-h // sub))),
+                             Image.NEAREST)
+        elif max(w, h) <= target // 2:            # увеличение — только целым k
+            k = target // max(w, h)
+            img = img.resize((w * k, h * k), Image.NEAREST)
+        if max(img.width, img.height) > self.size or min(img.size) < 1:
+            return None                           # нестандарт — пусть рисует Tk
+        return img
+
+    def _via_imagetk(self, img):
+        """Fallback: ImageTk (только если Pillow собран с Tk-поддержкой)."""
+        if ImageTk is None:
+            return None
         try:
-            bg_rgb = self._c.winfo_toplevel().winfo_rgb(self._bg)
-            bg = tuple(c >> 8 for c in bg_rgb)
+            size = self.size
+            comp = Image.new("RGB", (size, size), self._bg_rgb())
+            ox, oy = (size - img.width) // 2, (size - img.height) // 2
+            comp.paste(img, (ox, oy), img)
+            return ImageTk.PhotoImage(comp)
         except Exception:
-            bg = (0x1a, 0x1a, 0x1e)
-        comp = Image.new("RGB", (self.size, self.size), bg)
-        ox, oy = (self.size - img.width) // 2, (self.size - img.height) // 2
-        comp.paste(img, (ox, oy), img)            # альфа → фон, без артефактов
-        return ImageTk.PhotoImage(comp)
+            return None
 
     def load_external(self, path) -> bool:
         """Загрузить внешний PNG (drag&drop) вместо ассета настроения."""
-        if Image is None:
-            return False
         try:
-            self._photos[("ext", self.size)] = self._prepare_asset(path)
+            if Image is not None:
+                self._photos[("ext_img", self.size)] = self._load_asset(path)
+            else:
+                self._photos[("ext_img", self.size)] = None
+                self._photos[("ext", self.size)] = tk.PhotoImage(file=str(path))
+                self._c.delete("sprite")
+                self._c.create_image(self.size // 2, self.size // 2,
+                                     image=self._photos[("ext", self.size)],
+                                     tags="sprite")
             self._external = str(path)
             self.draw()
             return True
@@ -272,8 +440,11 @@ class Dragon(Frame):
             return False
 
     def _placeholder(self):
-        """Мини-заглушка без Pillow/ассетов: красный силуэт (не зелёный!)."""
-        s, px = self.size, max(4, self.size // 16)
+        self._c.delete("sprite")
+        """Мини-заглушка без Pillow/ассетов: красный силуэт (не зелёный!),
+        отцентрован в квадрате size x size."""
+        px = max(4, self.size // 16)
+        ox = oy = (self.size - 16 * px) // 2
         red, dark = "#d63b3b", "#8f2020"
         cells = [(4, 2), (7, 1), (10, 2),                      # три головы
                  (5, 4), (6, 4), (7, 4), (8, 4), (9, 4),       # шеи
@@ -281,5 +452,6 @@ class Dragon(Frame):
                  (4, 7), (5, 7), (6, 7), (7, 7), (8, 7), (9, 7), (10, 7),
                  (11, 7), (12, 6), (13, 5)]                     # хвост
         for ix, iy in cells:
-            self._c.create_rectangle(ix * px, iy * px, (ix + 1) * px, (iy + 1) * px,
+            self._c.create_rectangle(ox + ix * px, oy + iy * px,
+                                     ox + (ix + 1) * px, oy + (iy + 1) * px,
                                      fill=red if (ix + iy) % 3 else dark, outline="")
