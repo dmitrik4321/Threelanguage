@@ -59,6 +59,32 @@ class SyncClient:
             return 0, {"error": f"сеть недоступна: {e}"}
 
     # ---- auth
+    def shutdown(self) -> tuple[int, dict]:
+        """Остановить сервер, который подняло приложение.
+
+        Порядок: сначала health() — он перебирает port-file и все
+        порты-кандидаты и переставляет self.base на реально живой наш
+        сервер (в т.ч. на порт автовыбора за пределами списка); затем
+        POST /shutdown уже по правильному адресу. Фолбэк — прямой обход
+        кандидатов, если base не обновился.
+        """
+        if self.health():
+            code, body = self._req("POST", "/shutdown", {})
+            if code == 200:
+                return code, body
+        # health() с _explicit=True не перебирает порты; сделаем обход сами.
+        for p in ([_port_from_file()] if _port_from_file() else []) + CANDIDATE_PORTS:
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{p}/shutdown", method="POST",
+                    data=b"{}", headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=1) as r:
+                    if r.status == 200:
+                        return 200, {}
+            except Exception:
+                continue
+        return 0, {"error": "сервер не отозвался на /shutdown"}
+
     def health(self) -> bool:
         """Наш ли сервер доступен; при сбое перебрать порты-кандидаты.
 

@@ -153,6 +153,7 @@ class App:
         self.entry = None
 
         tk_root.bind("<Escape>", lambda e: self.go_home())
+        tk_root.protocol("WM_DELETE_WINDOW", self.on_close)
         # KeyPress надёжнее KeyRelease+keysym Digit1 (Digit1 отсутствует в старых X keysym)
         for d in "1234":
             tk_root.bind(f"<KeyPress-{d}>", lambda e, i=int(d) - 1: self._hotkey(i))
@@ -304,6 +305,8 @@ class App:
 
     # ------------------------------------------------------ idle / AFK watchdog
     def schedule_idle_check(self):
+        self._hb_job = None
+        self._heartbeat()
         self._idle_job = self.tk.after(2000, self._idle_tick)
 
     def _idle_tick(self):
@@ -798,9 +801,13 @@ class App:
                     kwargs = {"creationflags": 0x00000008 | 0x00000200}  # DETACHED | NO_WINDOW
                 else:
                     kwargs = {"start_new_session": True}
+                env = dict(os.environ, TL_PARENT_PID=str(os.getpid()), TL_GUI_APP="1")
+                # явный pid родителя: сервер сам завершится, когда GUI закрыт
                 subprocess.Popen([sys.executable, str(server_py)],
                                  stdout=logf, stderr=logf, cwd=str(server_py.parent),
-                                 **kwargs)
+                                 env=env, **kwargs)
+                self._srv_spawned = True   # сервер подняли МЫ — при закрытии окна
+                                           # on_close попросит его остановиться
         except Exception as e:
             self.toast.show(f"не удалось поднять сервер: {e}", T.RED)
             return
@@ -829,6 +836,38 @@ class App:
                             f" · полный лог: {self._srv_log_path}", T.RED)
             return
         self._srv_poll_job = self.tk.after(200, self._poll_server)
+
+    def _heartbeat(self):
+        """Пока окно открыто и пользователь залогинен — тихо стучимся на
+        сервер (/health обновляет hb-файл): это подтверждает orphan-watchdog,
+        что хозяин жив. Не залогинен — не дергаем сеть каждые 5 с; если сам
+        GUI поднял сервер (_ensure_server), heartbeat идёт пока ждём /health."""
+        self._hb_job = None
+        try:
+            if self.sync.token or getattr(self, "_srv_poll_deadline", 0) > time.time():
+                self.sync.health()
+        except Exception:
+            pass
+        self._hb_job = self.tk.after(5000, self._heartbeat)
+
+    def on_close(self, event=None):
+        """Закрытие окна: гасим heartbeat и останавливаем сервер, который
+        подняли сами (POST /shutdown). Осиротевший python-процесс не должен
+        переживать приложение — иначе он блокирует удаление папки проекта."""
+        try:
+            if getattr(self, "_hb_job", None):
+                self.tk.after_cancel(self._hb_job)
+                self._hb_job = None
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_srv_spawned", False):
+                # shutdown() сам переберёт порты-кандидаты: base клиента мог
+                # остаться на устаревшем порте из port-file (сервер переехал)
+                self.sync.shutdown()
+        except Exception:
+            pass
+        return True
 
     def _do_register(self):
         ok, msg = self.sync.register(*self._auth_fields())

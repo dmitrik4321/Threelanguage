@@ -19,6 +19,8 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -30,6 +32,7 @@ except ImportError as e:  # pragma: no cover
 DB_PATH = Path.home() / ".threelanguage" / "local_server.db"
 PORT_FILE = Path.home() / ".threelanguage" / "server_port"
 LOCK_FILE = Path.home() / ".threelanguage" / "server.lock"
+HB_PATH = Path.home() / ".threelanguage" / "server_hb"
 PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
 ADMIN_TOKEN = os.environ.get("TL_ADMIN_TOKEN", "")  # пусто = без токена (localhost)
 
@@ -65,8 +68,11 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:      # чужой процесс — он жив
         return True
-    except OSError:              # EINVAL и прочее — считаем мёртвым, не падаем
-        return False
+    except OSError as e:
+        # EINVAL и прочее: не уверены — считаем живым, чтобы никогда никого
+        # не «похоронить» ложным verdict. Watchdog сам разберётся по hb.
+        import errno
+        return e.errno != errno.ESRCH
 
 
 def _health_ok(port: int) -> bool:
@@ -361,7 +367,20 @@ def admin():
 
 @app.get("/health")
 def health():
+    try:   # «сердцебиение» для orphan-watchdog: каждый запрос GUI обновляет mtime
+        HB_PATH.touch()
+    except OSError:
+        pass
     return jsonify({"ok": True, "ts": int(time.time()), "app": "threelanguage-local"})
+
+
+@app.post("/shutdown")
+def shutdown():
+    """Вежливая остановка по запросу GUI (закрытие окна): сервер, который
+    приложение подняло само, не должен осиротеть и держать папку проекта."""
+    LOCK_FILE.unlink(missing_ok=True)
+    threading.Timer(0.3, lambda: os._exit(0)).start()  # дать ответить на запрос
+    return jsonify({"ok": True, "bye": True})
 
 
 init_db()
@@ -394,6 +413,67 @@ if __name__ == "__main__":
     PORT_FILE.write_text(str(chosen))
     print(f"Threelanguage local server: http://127.0.0.1:{chosen}  "
           f"(админка: http://127.0.0.1:{chosen}/admin)")
+
+    def _watch_parent():
+        """Ребёнок не должен переживать родителя-приложение (осиротевший
+        python блокировал удаление папки проекта). Родитель либо задан в
+        аргументах (--parent-pid), либо это PARENT_PID из окружения GUI."""
+        ppid = None
+        for i, a in enumerate(sys.argv):
+            if a == "--parent-pid" and i + 1 < len(sys.argv):
+                ppid = int(sys.argv[i + 1])
+        if not ppid:
+            ppid = int(os.environ.get("TL_PARENT_PID") or 0)
+        if not ppid or ppid <= 1 or ppid == os.getpid():
+            return
+        # Защита от рециклинга pid (особенно Windows): одной «живости» мало.
+        # Хозяин подтверждён, если (а) его environ содержит TL_GUI_APP=1
+        # (ставит app.py при Popen; на Linux читается, на Windows — нет) или
+        # (б) он недавно ходил к нам по HTTP (sync каждые несколько секунд).
+        # Мёртвый хозяин + тишина > grace -> закрываемся, папку проекта можно
+        # удалять. Grace нужен, чтобы не убить себя при первом же idle-цикле.
+        # grace НЕ наследуем из окружения родителя (случайный TL_* в shell
+        # мог превратить нормальный запуск в самоубийство); только --arg.
+        grace = 45.0
+        for i, a in enumerate(sys.argv):
+            if a == "--orphan-grace" and i + 1 < len(sys.argv):
+                grace = float(sys.argv[i + 1])
+        last_seen = 0.0          # первый цикл обязан выполнить проверку,
+        first_tick = True        # иначе grace отсчитывается от старта сервера
+        dbg = os.environ.get("TL_WATCHDOG_DEBUG") == "1"
+        def _log(msg):
+            if dbg:
+                print("[watchdog]", msg, flush=True)
+        while True:
+            time.sleep(2.0)
+            confirmed = False
+            if _pid_alive(ppid):
+                confirmed = True
+                if ppid != os.getppid():
+                    try:   # если можем прочитать environ и маркера нет — это НЕ наш родитель
+                        env = open(f"/proc/{ppid}/environ", "rb").read().split(b"\0")
+                        if b"TL_GUI_APP=1" not in env:
+                            confirmed = False
+                    except OSError:
+                        pass   # Windows/нет доступа — полагаемся на HTTP-подтверждение
+            hb_age = None
+            try:
+                hb_age = time.time() - HB_PATH.stat().st_mtime
+            except OSError:
+                pass
+            if hb_age is not None and hb_age < 15:
+                confirmed = True   # GUI стучался недавно — хозяин жив
+            _log(f"ppid={ppid} pidalive={_pid_alive(ppid)} hb_age="
+                 f"{None if hb_age is None else round(hb_age)} confirmed={confirmed}")
+            if confirmed or first_tick:
+                last_seen = time.time()
+                first_tick = False
+            elif time.time() - last_seen > grace:
+                print("[i] родительское приложение закрыто — сервер останавливается")
+                LOCK_FILE.unlink(missing_ok=True)
+                os._exit(0)
+
+    threading.Thread(target=_watch_parent, daemon=True).start()
     try:
         app.run(host="127.0.0.1", port=chosen)
     finally:
