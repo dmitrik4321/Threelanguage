@@ -29,8 +29,44 @@ except ImportError as e:  # pragma: no cover
 
 DB_PATH = Path.home() / ".threelanguage" / "local_server.db"
 PORT_FILE = Path.home() / ".threelanguage" / "server_port"
+LOCK_FILE = Path.home() / ".threelanguage" / "server.lock"
 PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
 ADMIN_TOKEN = os.environ.get("TL_ADMIN_TOKEN", "")  # пусто = без токена (localhost)
+
+
+def _lock_is_stale(path: Path) -> bool:
+    """True, если lock-файл указывает на мёртвый процесс."""
+    try:
+        pid = int(path.read_text().strip())
+    except (OSError, ValueError):
+        return True
+    if pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)          # существует ли процесс
+        return False
+    except ProcessLookupError:   # процесса нет — lock от упавшего сервера
+        return True
+    except PermissionError:      # чужой процесс — он жив
+        return False
+
+
+def acquire_lock():
+    """Один экземпляр сервера. Без этого GUI-автоподнятие и ручной запуск
+    дрались за порт, второй падал с OSError в консоли — пользователь видел
+    «мелькнул логгер и закрылось» («самозакрывающийся сервер»)."""
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_FILE.exists():
+        if _lock_is_stale(LOCK_FILE):
+            LOCK_FILE.unlink(missing_ok=True)     # мусор от упавшего — чистим
+        else:
+            print(f"[!] Сервер уже запущен (pid {LOCK_FILE.read_text().strip()}). "
+                  f"Адрес: http://127.0.0.1:{PORT_FILE.read_text().strip() if PORT_FILE.exists() else PORT}")
+            raise SystemExit(0)                   # не падение, а вежливый выход
+    fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+
 
 app = Flask(__name__)
 
@@ -294,6 +330,7 @@ if __name__ == "__main__":
     # Порт: TL_SERVER_PORT или 8765; если занят чужим процессом — автовыбор
     # следующего свободного + запись фактического порта в ~/.threelanguage/server_port,
     # чтобы десктоп-клиент сам нашёл сервер (см. build/sync_client.py).
+    acquire_lock()
     chosen = _free_port(PORT)
     if chosen != PORT:
         print(f"[!] Порт {PORT} занят — использую {chosen}")
@@ -301,4 +338,7 @@ if __name__ == "__main__":
     PORT_FILE.write_text(str(chosen))
     print(f"Threelanguage local server: http://127.0.0.1:{chosen}  "
           f"(админка: http://127.0.0.1:{chosen}/admin)")
-    app.run(host="127.0.0.1", port=chosen)
+    try:
+        app.run(host="127.0.0.1", port=chosen)
+    finally:
+        LOCK_FILE.unlink(missing_ok=True)         # освобождаем место для перезапуска
