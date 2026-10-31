@@ -33,7 +33,8 @@ import time
 from pathlib import Path
 
 try:
-    from flask import Flask, jsonify, request, redirect, render_template_string
+    from flask import (Flask, jsonify, request, redirect, render_template_string,
+                       send_from_directory, g)
 except ImportError as e:  # pragma: no cover
     raise SystemExit("Нужен Flask: pip install flask") from e
 
@@ -186,6 +187,115 @@ def acquire_lock():
 
 app = Flask(__name__)
 
+# ------------------------------------------------------------- веб-клиент ----
+# local_server/webapp/ — HTML+CSS+JS перенос десктопного билда (build/app.py).
+# Ядро там — shared/algorithm/web_core.js (порт reference.py, паритет в тестах).
+WEBAPP_DIR = Path(__file__).resolve().parent / "webapp"
+CORE_JS = Path(__file__).resolve().parent.parent / "shared" / "algorithm" / "web_core.js"
+MASCOT_DIR = Path(__file__).resolve().parent.parent / "assets" / "mascot"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+CLIENT_KEY = "tl_client"          # g по запросу: web | desktop | admin
+
+
+def _client_kind() -> str:
+    """Кто стучится: явный заголовок X-Client (веб-клиент шлёт 'web' всегда),
+    иначе admin (cookie-сессия админки / X-Admin-Token), иначе 'desktop' для
+    запросов с Bearer-токеном (так ходит sync_client.py), иначе 'web'."""
+    h = (request.headers.get("X-Client") or "").strip().lower()
+    if h in ("web", "desktop", "admin"):
+        return h
+    if request.path.startswith("/admin") or \
+            request.cookies.get(ADMIN_COOKIE) or \
+            (ADMIN_TOKEN and request.headers.get("X-Admin-Token") == ADMIN_TOKEN):
+        return "admin"
+    if request.headers.get("Authorization", "").startswith("Bearer "):
+        return "desktop"
+    return "web"
+
+
+@app.before_request
+def _tag_client():
+    setattr(g, CLIENT_KEY, _client_kind())
+
+
+@app.after_request
+def _log_client(resp):
+    """Каждый запрос пишется в stdout и в таблицу events с меткой клиента —
+    веб-трафик отличается от десктопного во всех логах ([client=web])."""
+    kind = getattr(g, CLIENT_KEY, _client_kind())
+    line = (f"[client={kind}] {request.method} {request.path} -> {resp.status_code}"
+            f" @ {time.strftime('%H:%M:%S')}")
+    print(line, flush=True)
+    try:
+        with db() as con:
+            con.execute("INSERT INTO events(ts, client, method, path, status) VALUES(?,?,?,?,?)",
+                        (int(time.time()), kind, request.method, request.path[:120],
+                         resp.status_code))
+    except sqlite3.Error:
+        pass       # лог не должен ронять запрос (например, при старте до init_db)
+    return resp
+
+
+@app.get("/")
+def web_index():
+    return send_from_directory(WEBAPP_DIR, "index.html")
+
+
+@app.get("/static/<path:fname>")
+def web_static(fname):
+    return send_from_directory(WEBAPP_DIR / "static", fname)
+
+
+@app.get("/core/web_core.js")
+def web_core_js():
+    return send_from_directory(CORE_JS.parent, CORE_JS.name, mimetype="application/javascript")
+
+
+@app.get("/mascot/<path:fname>")
+def web_mascot(fname):
+    return send_from_directory(MASCOT_DIR, fname)
+
+
+@app.get("/api/content/lesson")
+def content_lesson():
+    """Живой урок из того же модуля, что использует десктоп (build/data_sources.py)."""
+    langs = (request.args.get("langs") or "en,pt-BR,zh").split(",")
+    sys.path.insert(0, str(REPO_ROOT / "build"))
+    try:
+        import data_sources as ds
+        lesson = ds.build_lesson([l.strip() for l in langs])
+    except Exception as e:
+        return jsonify({"error": f"content: {e}"}), 502
+    return jsonify(lesson)
+
+
+@app.get("/api/content/placement")
+def content_placement():
+    lang = request.args.get("lang") or "pt-BR"
+    sys.path.insert(0, str(REPO_ROOT / "build"))
+    try:
+        import data_sources as ds
+        items = ds.placement_items([lang])
+    except Exception as e:
+        return jsonify({"error": f"content: {e}"}), 502
+    return jsonify({"items": items})
+
+
+@app.get("/api/packs")
+def api_packs():
+    """Список языковых пакетов (тот же сканер lang_packs/, что у десктопа)."""
+    sys.path.insert(0, str(REPO_ROOT / "build"))
+    try:
+        import packs
+        app_ui = [p.get("code") or p.get("id", "ru") for p in packs.scan_app_ui()]
+        learn = [{"id": p.get("id"), "src": p.get("source") or p.get("src"),
+                  "tgt": p.get("target") or p.get("tgt"), "name": p.get("name")}
+                 for p in packs.scan_study()]
+    except Exception:
+        app_ui, learn = ["ru"], []
+    return jsonify({"app_ui": app_ui or ["ru"], "learn": learn})
+
 
 def db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +321,13 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             state_json TEXT NOT NULL,
             updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            client TEXT NOT NULL,          -- web | desktop | admin
+            method TEXT NOT NULL,
+            path TEXT NOT NULL,
+            status INTEGER NOT NULL);
         """)
 
 
@@ -368,6 +485,14 @@ ADMIN_TMPL = """<!doctype html><html><head><meta charset="utf-8">
 <pre style="background:#1d2534;padding:8px;font-size:11px;overflow:auto">{{s.pretty}}</pre>
 {% endfor %}{% if not states %}<i>пусто — пушни что-нибудь из приложения</i>{% endif %}
 
+<h2>Активность клиентов (web vs desktop)</h2>
+<table><tr><th>клиент</th><th>запросов всего</th><th>за последний час</th></tr>
+{% for e in clients %}<tr><td>{{e.client}}</td><td>{{e.n}}</td><td>{{e.recent}}</td></tr>{% endfor %}</table>
+<h2>Последние запросы</h2>
+<table><tr><th>время</th><th>клиент</th><th>метод</th><th>путь</th><th>код</th></tr>
+{% for e in events %}<tr><td>{{e.ts}}</td><td>{{e.client}}</td><td>{{e.method}}</td>
+<td>{{e.path}}</td><td>{{e.status}}</td></tr>{% endfor %}</table>
+
 <h2>Вставить свой пример (demo-state)</h2>
 <p style="font-size:12px;color:#93a1b5">JSON в формате состояния клиента
 (default_state из build/app.py). Сохранится под пользователем demo / demo1234.</p>
@@ -422,7 +547,24 @@ def admin():
                                                      time.localtime(s["updated_at"])),
                                pretty=pretty[:4000]))
     example = json.dumps(DEFAULT_EXAMPLE, ensure_ascii=False, indent=2)
-    return render_template_string(ADMIN_TMPL, users=users, states=states, example=example)
+    # активность клиентов из таблицы events (пишет _log_client в after_request)
+    clients, events = [], []
+    try:
+        since = int(time.time()) - 3600
+        with db() as con:
+            for r in con.execute("""SELECT client, COUNT(*) n,
+                                    SUM(CASE WHEN ts>? THEN 1 ELSE 0 END) recent
+                                    FROM events GROUP BY client ORDER BY n DESC""", (since,)):
+                clients.append(dict(client=r["client"], n=r["n"], recent=r["recent"] or 0))
+            for r in con.execute("""SELECT ts, client, method, path, status FROM events
+                                    ORDER BY id DESC LIMIT 25"""):
+                events.append(dict(ts=time.strftime("%H:%M:%S", time.localtime(r["ts"])),
+                                   client=r["client"], method=r["method"],
+                                   path=r["path"], status=r["status"]))
+    except sqlite3.Error:
+        pass
+    return render_template_string(ADMIN_TMPL, users=users, states=states, example=example,
+                                  clients=clients, events=events)
 
 
 # ------------------------------------------------------ страница входа ----
