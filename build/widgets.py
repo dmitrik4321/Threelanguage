@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 import tkinter as tk
 from tkinter import Canvas, Frame, Label
 
@@ -155,17 +156,36 @@ MOOD_TO_PNG = {"idle": "dragon_idle", "cheer": "dragon_cheer", "sad": "dragon_sa
                "angry": "dragon_angry", "sleep": "dragon_sleep"}
 
 
-class Dragon(Canvas):
-    """Маскота: PNG через Pillow, иначе процедурный пиксельный дракон (3 головы)."""
-    PIXEL = 8
+def _mascot_dir() -> Path:
+    """Каталог ассетов: сначала репозиторий, затем ~/.threelanguage/assets."""
+    cand = [Path(__file__).resolve().parent.parent / "assets" / "mascot",
+            Path.home() / ".threelanguage" / "assets"]
+    for c in cand:
+        if (c / "dragon_idle.png").exists():
+            return c
+    return cand[0]
 
+
+class Dragon(Frame):
+    """Маскота из ГОТОВЫХ PNG-ассетов (assets/mascot/dragon_*.png, красный дракон).
+
+    Ключевые исправления:
+      * НЕ наследуем Canvas — Tk-баг: у подкласса Canvas внутренний tk widget
+        перезаписывает атрибут ._w именем окна, и create_* падает с
+        «invalid command name "<число>"» (это и был «забагованный дракон»).
+      * Рисуем ТОЛЬКО ассеты; процедурный зелёный рисунок убран.
+      * Pillow опционален: без него показываем пиксельную иконку-заглушку.
+    """
     def __init__(self, master, *, size=T.MASCOT_SIZE):
-        super().__init__(master, width=size, height=size,
-                         bg=_bg_of(master), highlightthickness=0)
+        super().__init__(master, bg=_bg_of(master), highlightthickness=0)
         self.size = size
         self.mood = "idle"
-        self._photos = {}
         self._blink = False
+        self._photos: dict[tuple[str, int], object] = {}
+        self._img_id = None
+        self._c = Canvas(self, width=size, height=size, bg=_bg_of(master),
+                         highlightthickness=0)
+        self._c.pack(fill="both", expand=True)
         self.draw()
 
     def set_mood(self, mood: str):
@@ -173,72 +193,56 @@ class Dragon(Canvas):
         self.draw()
 
     def tick(self):
-        """Мигание раз в ~3с — живой экран без нагрузки."""
+        """Живость: смена настроения не нужна для мигания на PNG — просто redraw."""
         self._blink = not self._blink
-        if self.mood != "sleep":
-            self.draw()
+        self.draw()
 
-    # ---- PNG путь
-    def _try_png(self, name: str) -> bool:
+    def draw(self):
+        self._c.delete("all")
+        ext = getattr(self, "_external", None)
+        if ext and ("ext", self.size) in self._photos:
+            self._c.create_image(self.size // 2, self.size // 2,
+                                 image=self._photos[("ext", self.size)])
+            return
+        name = MOOD_TO_PNG.get(self.mood, "dragon_idle")
+        if Image is not None:
+            key = (name, self.size)
+            if key not in self._photos:
+                p = _mascot_dir() / f"{name}.png"
+                if p.exists():
+                    img = Image.open(p).convert("RGBA")
+                    img.thumbnail((self.size - 4, self.size - 4), Image.NEAREST)
+                    self._photos[key] = ImageTk.PhotoImage(img)
+            ph = self._photos.get(key)
+            if ph is not None:
+                self._img_id = self._c.create_image(self.size // 2, self.size // 2,
+                                                    image=ph)
+                return
+        self._placeholder()
+
+    def load_external(self, path) -> bool:
+        """Загрузить внешний PNG (drag&drop) вместо ассета настроения."""
         if Image is None:
             return False
-        from pathlib import Path
-        p = Path(__file__).resolve().parent.parent / "assets" / "mascot" / f"{name}.png"
-        if not p.exists():
+        try:
+            img = Image.open(path).convert("RGBA")
+            img.thumbnail((self.size - 4, self.size - 4), Image.NEAREST)
+            self._photos[("ext", self.size)] = ImageTk.PhotoImage(img)
+            self._external = str(path)
+            self.draw()
+            return True
+        except Exception:
             return False
-        key = (name, self.size)
-        if key not in self._photos:
-            img = Image.open(p).convert("RGBA").resize((self.size - 4, self.size - 4), Image.NEAREST)
-            self._photos[key] = ImageTk.PhotoImage(img)
-        self.create_image(self.size // 2, self.size // 2, image=self._photos[key])
-        return True
 
-    # ---- процедурный пиксельный дракон
-    def draw(self):
-        self.delete("all")
-        s = self.size
-        if self._try_png(MOOD_TO_PNG.get(self.mood, "dragon_idle")):
-            return
-        px = s // 24                      # сетка 24×24 «пикселя»
-        cx = lambda i: (i * px, (i + 1) * px)
-
-        def sq(ix, iy, color):
-            x1, x2 = cx(ix); y1, y2 = cx(iy)
-            self.create_rectangle(x1, y1, x2, y2, fill=color, outline="")
-
-        body, belly = "#2e9e6b", "#7fe0a8"
-        head_c = {"idle": body, "cheer": "#3ecf8e", "sad": "#5b6ee1",
-                  "angry": "#e15b5b", "sleep": "#3a4a63"}[self.mood]
-        eye = "#f5efe6" if self.mood != "sleep" else "#93a1b5"
-        # тело
-        for ix in range(7, 17):
-            for iy in range(14, 20):
-                sq(ix, iy, belly if iy >= 18 else body)
-        # хвост
-        for i in range(4):
-            sq(17 + i, 17 - i // 2, body)
-        # три головы (центр/лево/право)
-        heads = [(5, 4), (11, 2), (17, 4)]
-        for hx, hy in heads:
-            for ix in range(hx, hx + 4):
-                for iy in range(hy, hy + 4):
-                    sq(ix, iy, head_c)
-            # морда
-            sq(hx + 4, hy + 2, head_c)
-            sq(hx + 4, hy + 3, head_c)
-            # глаз (мигание = закрыт)
-            if self._blink or self.mood == "sleep":
-                sq(hx + 2, hy + 1, head_c)
-                sq(hx + 2, hy + 2, eye)
-            else:
-                sq(hx + 2, hy + 1, eye)
-                sq(hx + 2, hy + 2, "#141a26")
-            # рог
-            sq(hx + 1, hy - 1, T.ACCENT)
-        # ноздри-акцент при cheer — огонёк
-        if self.mood == "cheer":
-            for ix in range(21, 23):
-                sq(ix, 5, T.ACCENT)
-        if self.mood == "sleep":
-            for (ix, iy) in [(20, 3), (21, 2), (22, 1)]:
-                sq(ix, iy, "#93a1b5")   # Z-z-z
+    def _placeholder(self):
+        """Мини-заглушка без Pillow/ассетов: красный силуэт (не зелёный!)."""
+        s, px = self.size, max(4, self.size // 16)
+        red, dark = "#d63b3b", "#8f2020"
+        cells = [(4, 2), (7, 1), (10, 2),                      # три головы
+                 (5, 4), (6, 4), (7, 4), (8, 4), (9, 4),       # шеи
+                 (4, 6), (5, 6), (6, 6), (7, 6), (8, 6), (9, 6), (10, 6),
+                 (4, 7), (5, 7), (6, 7), (7, 7), (8, 7), (9, 7), (10, 7),
+                 (11, 7), (12, 6), (13, 5)]                     # хвост
+        for ix, iy in cells:
+            self._c.create_rectangle(ix * px, iy * px, (ix + 1) * px, (iy + 1) * px,
+                                     fill=red if (ix + iy) % 3 else dark, outline="")

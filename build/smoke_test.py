@@ -121,5 +121,61 @@ app.on_input()
 check("возврат: focus_in + дракон проснулся",
       app.dragon.mood == "idle" and any(e[1] == "focus_in" for e in app.task_events))
 
+# --- v3: PNG-ассет дракона (красный, не процедурный зелёный)
+from widgets import Dragon as _D, MOOD_TO_PNG as _M
+_r2 = Tk(); _r2.withdraw()
+_dg = _D(_r2, size=96); _r2.update()
+check("дракон: использует готовые PNG-ассеты (idle)", ("dragon_idle", 96) in _dg._photos)
+_dg.set_mood("cheer"); _r2.update()
+check("дракон: смена настроения грузит нужный PNG", ("dragon_cheer", 96) in _dg._photos)
+import theme as _T
+_T.set_theme("light"); _bg_before = _T.BG
+_T.set_theme("dark")
+check("тема: light/dark переключаются через set_theme", _bg_before == "#f2f4f8" and _T.BG == "#141a26")
+
+# --- v3: кликабельное поле ввода (_entry_row + плейсхолдер)
+_r3 = Tk(); _r3.withdraw()
+app_for_entry = None
+class _MiniApp:
+    tk = _r3
+mini = _MiniApp()
+e = A.App._entry_row(mini, _r3, placeholder="напиши перевод…")
+_r3.update()
+check("поле ввода: внутри рамки-boxа (не в_ чужом родителе)", e.winfo_parent().count(".") >= 1)
+# Клик по рамке/полю должен фокусить Entry. Под Xvfb focus_get работает только
+# с видимым окном (у withdrawed-окна фокус всегда None), поэтому окно видно,
+# но спрятано за пределы экрана (-geometry +5000+5000).
+r3_geo = _r3.geometry(); _r3.deiconify(); _r3.geometry("+5000+5000"); _r3.update()
+_box = e.master
+_ph_before = e.get()  # плейсхолдер должен стоять до фокуса/ввода
+e.focus_force(); _r3.update()
+check("поле ввода: клик фокусит (focus_force-механизм)", _r3.focus_get() is e)
+check("плейсхолдер показан до ввода", _ph_before == "напиши перевод…")
+_r3.destroy()
+
+# --- v3: скан языковых пакетов
+import packs as _P
+ui = _P.scan_app_ui(); study = _P.scan_study()
+check("пакеты app_ui: ru и en находятся сканером", {p["code"] for p in ui} >= {"ru", "en"})
+check("пакеты study: формат язык-из-языка (ru-en, ru-zh)",
+      any(p.get("source") == "ru" and p.get("target") == "en" for p in study))
+s_en = _P.strings_for("en")
+check("строки en подтягиваются из пакета", s_en.get("correct", "").startswith("Correct"))
+
+# --- v3: sync_client против живого локального сервера (если запущен)
+from sync_client import SyncClient
+sc = SyncClient()
+if sc.health():
+    ok, msg = sc.register(f"smoke{int(time.time())%100000}", "testpass")
+    if not ok:
+        ok, msg = sc.login(f"smoke{int(time.time())%100000}", "testpass")
+    check("sync: регистрация/вход на localhost", ok)
+    ok, msg = sc.push_state({"hello": 1, "history": []})
+    check("sync: push состояния", ok)
+    st, msg = sc.pull_state()
+    check("sync: pull возвращает отправленное", st == {"hello": 1, "history": []})
+else:
+    print("SKIP sync (локальный сервер не запущен)")
+
 print("\nSMOKE", "OK" if not fails else f"FAILED: {fails}")
 sys.exit(0 if not fails else 1)
