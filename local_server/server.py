@@ -220,15 +220,22 @@ def _client_kind() -> str:
             kind = "desktop"
         else:
             kind = "web"
-    # Уточнение для веба: сервер сам знает, какую страницу он отдал этому
-    # браузеру (cookie tl_served); если cookie нет — свежая эвристика по UA.
+    # Уточнение для веба. Приоритет сигналов:
+    #   1) явный заголовок X-Client из fetch (страница знает, какая она);
+    #   2) cookie tl_served, поставленный последней отдачей страницы;
+    #   3) свежая эвристика по User-Agent (если cookie нет).
     if kind == "web":
-        # Явный override из app.js (мобильная сборка шлёт X-Client: web-mobile)
-        # и cookie tl_served от / надёжнее эвристики по UA.
-        if h == "web-mobile" or request.cookies.get("tl_served") == "web-mobile":  # см. выше
+        if h == "web-mobile":                       # fetch из мобильной сборки
+            kind = "web-mobile"
+        elif request.cookies.get("tl_served") == "web-mobile":
             kind = "web-mobile"
         elif not request.cookies.get("tl_served") and _is_mobile_ua(request.headers.get("User-Agent", "")):
             kind = "web-mobile"
+        elif h == "web" and request.cookies.get("tl_served") == "web-mobile":
+            pass                                   # страница authoritative: см. set_cookie в web_index
+        elif h == "web" and _is_mobile_ua(request.headers.get("User-Agent", "")) and \
+                request.cookies.get("tl_served") != "web":
+            kind = "web-mobile"                    # мобильный браузер без разметки -> мобилка
     return kind
 
 
@@ -270,8 +277,6 @@ def _is_mobile_ua(ua: str) -> bool:
     притворяется macOS-десктопом, но тачевик (Safari на планшете => мобильная v).
     """
     ua = ua or ""
-    if "android" in ua.lower() and "Mobile Safari" in ua and "Version/" not in ua:
-        return False          # WebView внутри Android-приложения — не браузер-телефон
     low = ua.lower()
     if _UA_MOBILE_RE.search(low):
         return True
@@ -296,7 +301,10 @@ def web_index():
         serve_mobile = _is_mobile_ua(request.headers.get("User-Agent", ""))
         page = "mobile.html" if serve_mobile else "index.html"
     resp = send_from_directory(WEBAPP_DIR, page)
+    # tl_served всегда перезаписывается по текущему решению: страница — authoritative,
+    # stale-cookie от прошлой сессии не должен переживать смену устройства/браузера.
     resp.set_cookie("tl_served", "web-mobile" if serve_mobile else "web", max_age=3600, samesite="Lax")
+    resp.vary.add("User-Agent")   # корректный кэш: разная выдача по UA
     print(f"[ua-route] {'MOBILE' if serve_mobile else 'DESKTOP'} <- {request.headers.get('User-Agent', '')[:90]}", flush=True)
     return resp
 
@@ -404,6 +412,12 @@ def init_db():
             path TEXT NOT NULL,
             status INTEGER NOT NULL);
         """)
+        # Миграция: в старых БД (до PR с логами статуса) колонки status нет —
+        # INSERT(...status) падал молча (except sqlite3.Error), и логи событий
+        # не писались вообще. Добавляем колонку, если её отсутствует.
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+        if "status" not in cols:
+            con.execute("ALTER TABLE events ADD COLUMN status INTEGER NOT NULL DEFAULT 200")
 
 
 def hash_pw(pw: str, salt: str) -> str:
