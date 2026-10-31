@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover + safe-area: корректная работа под «чёлкой» и статус-баром -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#141a26">
+<title>Threelanguage · мобильный клиент</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/mobile.css">
+</head>
+<body data-theme="dark" class="mobile">
+
+<div id="app">
+  <!-- Верхняя панель вместо сайдбара (десктопная v1 раскладка не годится на телефоне) -->
+  <header id="topbar">
+    <img id="dragon" src="/mascot/dragon_idle.png" alt="дракон" width="40" height="40">
+    <div class="brand">🐉 Threelanguage<span class="tag">mobile</span></div>
+    <button id="btn-menu" class="iconb" aria-label="Меню">☰</button>
+  </header>
+  <div id="mini-stats"></div>
+
+  <main id="content"></main>
+
+  <!-- Нижняя таб-панель — стандарт мобильной навигации -->
+  <nav id="tabbar">
+    <button data-nav="home" class="tabb active"><span class="ico">🏠</span>Домой</button>
+    <button data-nav="lesson" class="tabb"><span class="ico">▶</span>Урок</button>
+    <button data-nav="progress" class="tabb"><span class="ico">📊</span>Прогресс</button>
+    <button data-nav="settings" class="tabb"><span class="ico">⚙</span>Ещё</button>
+  </nav>
+
+  <!-- Выдвижное меню (синхронизация/аккаунт) -->
+  <div id="drawer" class="hidden">
+    <div class="drawer-sheet">
+      <div id="whoami" class="dim"></div>
+      <button id="btn-sync" class="cta blue block">⇅ Синхронизировать</button>
+      <button id="btn-close-drawer" class="ghost block">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<!-- Ядро: JS-порт эталонного shared/algorithm/reference.py (паритет в тестах).
+     Тот же файл, что у десктопного веб-клиента: логика оценок/SRS/АФК одна на всех. -->
+<script src="/core/web_core.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/mobile.js"></script>
+</body>
+</html>
