@@ -39,7 +39,7 @@ function rollDay(st) {
     for (const l of Object.keys(LANG_NAMES)) st.minutes[l] = 0.0; }
 }
 
-const st = loadState(); rollDay(st); saveState(st);
+var st = loadState(); rollDay(st); saveState(st);   // var (не const): mobile-обёртка v2 может переключить ссылку
 let sessionAnswers = [];
 let tasks = [], taskI = 0, currentTask = null, langOfCurrent = null;
 let plResponses = [];
@@ -48,7 +48,8 @@ let taskEvents = [], taskStartWall = 0, lastInputT = 0;
 
 // ------------------------------------------------------------- api (web) ----
 async function api(path, method = "GET", body = null, auth = true) {
-  const headers = { "Content-Type": "application/json", "X-Client": "web" };
+  // __TL_CLIENT__ ставит mobile.js: 'web-mobile'; по умолчанию десктопная v1 -> 'web'.
+  const headers = { "Content-Type": "application/json", "X-Client": window.__TL_CLIENT__ || "web" };
   if (auth && st.account.token) headers.Authorization = "Bearer " + st.account.token;
   const r = await fetch(path, { method, headers, body: body === null ? undefined : JSON.stringify(body) });
   let j = {}; try { j = await r.json(); } catch (e) { /* не-json ответ */ }

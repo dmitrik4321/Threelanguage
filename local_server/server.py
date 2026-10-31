@@ -25,6 +25,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -185,12 +186,12 @@ def acquire_lock():
     os.close(fd)
 
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)   # статику раздаём своими маршрутами ниже
 
 # ------------------------------------------------------------- веб-клиент ----
 # local_server/webapp/ — HTML+CSS+JS перенос десктопного билда (build/app.py).
 # Ядро там — shared/algorithm/web_core.js (порт reference.py, паритет в тестах).
-WEBAPP_DIR = Path(__file__).resolve().parent / "webapp"
+WEBAPP_DIR = Path(os.environ.get("TL_WEBAPP_DIR", str(Path(__file__).resolve().parent / "webapp")))
 CORE_JS = Path(__file__).resolve().parent.parent / "shared" / "algorithm" / "web_core.js"
 MASCOT_DIR = Path(__file__).resolve().parent.parent / "assets" / "mascot"
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -201,17 +202,41 @@ CLIENT_KEY = "tl_client"          # g по запросу: web | desktop | admin
 def _client_kind() -> str:
     """Кто стучится: явный заголовок X-Client (веб-клиент шлёт 'web' всегда),
     иначе admin (cookie-сессия админки / X-Admin-Token), иначе 'desktop' для
-    запросов с Bearer-токеном (так ходит sync_client.py), иначе 'web'."""
+    запросов с Bearer-токеном (так ходит sync_client.py), иначе 'web'.
+
+    Веб-трафик дополнительно уточняется по User-Agent и cookie tl_served,
+    которое ставит / при отдаче страницы: мобильный браузер логируется как
+    'web-mobile', десктопный — 'web'. API-запросы от мобилки несут UA телефона
+    в каждом fetch, поэтому классификация работает без доп. заголовков."""
+    # 'web' от клиента — это базовое вебо; его ещё уточним по UA/cookie ниже.
     h = (request.headers.get("X-Client") or "").strip().lower()
-    if h in ("web", "desktop", "admin"):
-        return h
-    if request.path.startswith("/admin") or \
-            request.cookies.get(ADMIN_COOKIE) or \
-            (ADMIN_TOKEN and request.headers.get("X-Admin-Token") == ADMIN_TOKEN):
-        return "admin"
-    if request.headers.get("Authorization", "").startswith("Bearer "):
-        return "desktop"
-    return "web"
+    kind = h if h in ("desktop", "admin", "web", "web-mobile") else None
+    if kind is None:
+        if request.path.startswith("/admin") or \
+                request.cookies.get(ADMIN_COOKIE) or \
+                (ADMIN_TOKEN and request.headers.get("X-Admin-Token") == ADMIN_TOKEN):
+            kind = "admin"
+        elif request.headers.get("Authorization", "").startswith("Bearer "):
+            kind = "desktop"
+        else:
+            kind = "web"
+    # Уточнение для веба. Приоритет сигналов:
+    #   1) явный заголовок X-Client из fetch (страница знает, какая она);
+    #   2) cookie tl_served, поставленный последней отдачей страницы;
+    #   3) свежая эвристика по User-Agent (если cookie нет).
+    if kind == "web":
+        if h == "web-mobile":                       # fetch из мобильной сборки
+            kind = "web-mobile"
+        elif request.cookies.get("tl_served") == "web-mobile":
+            kind = "web-mobile"
+        elif not request.cookies.get("tl_served") and _is_mobile_ua(request.headers.get("User-Agent", "")):
+            kind = "web-mobile"
+        elif h == "web" and request.cookies.get("tl_served") == "web-mobile":
+            pass                                   # страница authoritative: см. set_cookie в web_index
+        elif h == "web" and _is_mobile_ua(request.headers.get("User-Agent", "")) and \
+                request.cookies.get("tl_served") != "web":
+            kind = "web-mobile"                    # мобильный браузер без разметки -> мобилка
+    return kind
 
 
 @app.before_request
@@ -237,9 +262,67 @@ def _log_client(resp):
     return resp
 
 
+# ----------------------- маршрутизация по User-Agent (десктоп v1 / мобилка v2) --
+_UA_MOBILE_RE = re.compile(
+    r"android|iphone|ipod|iemobile|blackberry|windows phone|webos|kindle|"
+    r"opera mini|mobile safari|palm", re.I)
+
+
+def _is_mobile_ua(ua: str) -> bool:
+    """True, если User-Agent выглядит как телефон/планшет.
+
+    Приоритет: явный override ?client=mobile|desktop и cookie tl_client_choice
+    (переключалки в обеих страницах — можно принудительно посмотреть чужую v).
+    Иначе эвристика по UA: мобильные токены; отдельно iPadOS >= 13, который
+    притворяется macOS-десктопом, но тачевик (Safari на планшете => мобильная v).
+    """
+    ua = ua or ""
+    low = ua.lower()
+    if _UA_MOBILE_RE.search(low):
+        return True
+    if "macintosh" in low and "cpu os" in low and "safari" in low \
+            and "touchscreen" in request.headers.get("X-Architecture", "").lower():
+        return True           # iPadOS desktop-UA обманка (ограничение: см. README PR)
+    return False
+
+
 @app.get("/")
 def web_index():
-    return send_from_directory(WEBAPP_DIR, "index.html")
+    """Кто стучится по User-Agent — тому своя версия клиента.
+
+    Мобильный UA получает mobile.html (v2), остальным — index.html (v1).
+    Выбор пишется в лог запроса ([client=web-mobile] / [client=web])."""
+    choice = (request.args.get("client") or request.cookies.get("tl_client_choice") or "").lower()
+    if choice == "mobile":
+        serve_mobile, page = True, "mobile.html"
+    elif choice == "desktop":
+        serve_mobile, page = False, "index.html"
+    else:
+        serve_mobile = _is_mobile_ua(request.headers.get("User-Agent", ""))
+        page = "mobile.html" if serve_mobile else "index.html"
+    resp = send_from_directory(WEBAPP_DIR, page)
+    # tl_served всегда перезаписывается по текущему решению: страница — authoritative,
+    # stale-cookie от прошлой сессии не должен переживать смену устройства/браузера.
+    resp.set_cookie("tl_served", "web-mobile" if serve_mobile else "web", max_age=3600, samesite="Lax")
+    resp.vary.add("User-Agent")   # корректный кэш: разная выдача по UA
+    print(f"[ua-route] {'MOBILE' if serve_mobile else 'DESKTOP'} <- {request.headers.get('User-Agent', '')[:90]}", flush=True)
+    return resp
+
+
+@app.get("/desktop")
+def web_desktop():
+    """v1 всегда, независимо от User-Agent."""
+    resp = send_from_directory(WEBAPP_DIR, "index.html")
+    resp.set_cookie("tl_served", "web", max_age=3600, samesite="Lax")
+    return resp
+
+
+@app.get("/mobile")
+def web_mobile():
+    """v2 (мобильная адаптация) всегда, независимо от User-Agent."""
+    resp = send_from_directory(WEBAPP_DIR, "mobile.html")
+    resp.set_cookie("tl_served", "web-mobile", max_age=3600, samesite="Lax")
+    return resp
 
 
 @app.get("/static/<path:fname>")
@@ -324,11 +407,17 @@ def init_db():
         CREATE TABLE IF NOT EXISTS events(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts INTEGER NOT NULL,
-            client TEXT NOT NULL,          -- web | desktop | admin
+            client TEXT NOT NULL,          -- web | web-mobile | desktop | admin
             method TEXT NOT NULL,
             path TEXT NOT NULL,
             status INTEGER NOT NULL);
         """)
+        # Миграция: в старых БД (до PR с логами статуса) колонки status нет —
+        # INSERT(...status) падал молча (except sqlite3.Error), и логи событий
+        # не писались вообще. Добавляем колонку, если её отсутствует.
+        cols = {r["name"] for r in con.execute("PRAGMA table_info(events)")}
+        if "status" not in cols:
+            con.execute("ALTER TABLE events ADD COLUMN status INTEGER NOT NULL DEFAULT 200")
 
 
 def hash_pw(pw: str, salt: str) -> str:
