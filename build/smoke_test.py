@@ -36,6 +36,9 @@ def check(name, cond):
 root = Tk()
 root.withdraw()
 app = A.App(root)
+# Тест не зависит от сети: фиксируем офлайн-колоды (в рантайме их подменяет
+# живой fetch из data_sources — этот путь проверен отдельным прогоном с сетью).
+app.prefetch_content = lambda: None
 check("старт на домашнем экране", app.mode == "home")
 if app.st.get("placement_done"):
     app.st.update(placement_done=False, level=None); A.save_state(app.st)
@@ -44,9 +47,9 @@ pump(80)
 app.start_placement()  # та же команда, что у кнопки «Placement»
 
 # --- placement: кликаем правильные ответы кнопок / вводим текст
-for i in range(len(A.PLACEMENT_ITEMS)):
+for i in range(len(app.placement_live)):
     pump(60)
-    item = A.PLACEMENT_ITEMS[app._pl_idx]
+    item = app.placement_live[app._pl_idx]
     if "options" in item:
         app._opt_buttons[item["answer"]]._on_click(None)
     else:
@@ -60,7 +63,7 @@ app.start_lesson()
 check("кнопка/команда запуска урока работает", app.mode == "lesson")
 
 # --- урок: отвечаем; на 4-м задании имитируем АФК (пауза > порога медианы)
-tasks = list(A.LESSON["tasks"])
+tasks = list(app.lesson_live["tasks"])
 for idx, t in enumerate(tasks):
     pump(80)
     if app.mode != "lesson":
@@ -176,6 +179,63 @@ if sc.health():
     check("sync: pull возвращает отправленное", st == {"hello": 1, "history": []})
 else:
     print("SKIP sync (локальный сервер не запущен)")
+
+# --- v10: сиротский сервер не должен переживать GUI (баг: python оседал в
+# диспетчере задач и блокировал удаление папки проекта). Тест поднимает
+# сервер как «ребёнок» фиктивного родителя (--parent-pid), глушит hb-стук,
+# убивает родителя и ждёт, что сервер завершится сам.
+import subprocess as _sp
+_server_py = BUILD.parent / "local_server" / "server.py"
+if _server_py.exists():
+    try:
+        import flask as _flask  # noqa: F401
+        _have_flask = True
+    except ImportError:
+        _have_flask = False
+    if _have_flask:
+        _fake_parent = _sp.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+        # Тест полностью изолирован: свой HOME (свой lock/hb/port-файлы), свой
+        # порт 8791 и TL_PARENT_PID=-1 — watchdog принудительно выключен.
+        # Иначе тест убивал бы общий ~/.threelanguage/server.lock и зависал,
+        # если основной dev-сервер уже запущен (тот держит lock).
+        _test_home = Path(tempfile.mkdtemp(prefix="tl_smoke_"))
+        _env = {**__import__("os").environ, "TL_SERVER_PORT": "8791",
+                "HOME": str(_test_home), "USERPROFILE": str(_test_home),
+                "TL_PARENT_PID": "-1"}
+        _srv = _sp.Popen([sys.executable, str(_server_py),
+                          "--parent-pid", str(_fake_parent.pid),
+                          "--orphan-grace", "2"], env=_env,
+                         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        _hb = _test_home / ".threelanguage" / "server_hb"   # изолированный HOME теста
+        _up = False
+        for _ in range(50):
+            try:
+                _hb.unlink(missing_ok=True)   # стук GUI не подтверждает хозяина —
+                                              # проверяем именно реакцию на смерть
+                                              # родителя, а не на таймаут hb
+                with __import__("urllib.request", fromlist=["urlopen"]).urlopen(
+                        "http://127.0.0.1:8791/health", timeout=1) as _r:
+                    if b"threelanguage-local" in _r.read():
+                        _up = True; break
+            except Exception:
+                pass
+            time.sleep(0.2)
+        check("v10: сервер-ребёнок поднялся", _up and _srv.poll() is None)
+        _fake_parent.terminate(); _fake_parent.wait(timeout=5)
+        try:
+            _srv.wait(timeout=20)
+            _exited = True
+        except _sp.TimeoutExpired:
+            _srv.kill(); _srv.wait(timeout=5); _exited = False
+        check("v10: после смерти родителя сервер завершился сам (нет осиротевшего python)",
+              _up and _exited and _srv.returncode == 0)
+        (_Path := _test_home / ".threelanguage" / "server.lock")
+        check("v10: lock-файл освобождён", not _Path.exists() or
+              (_Path.read_text().strip() != str(_srv.pid)))
+    else:
+        print("SKIP v10 orphan-тест (нет flask)")
+else:
+    print("SKIP v10 orphan-тест (нет local_server/server.py)")
 
 print("\nSMOKE", "OK" if not fails else f"FAILED: {fails}")
 sys.exit(0 if not fails else 1)
