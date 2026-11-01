@@ -52,6 +52,135 @@ PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
 # пароль админки в admin_credentials.json (проверка и предупреждение в __main__).
 HOST = os.environ.get("TL_SERVER_HOST", "127.0.0.1")
 
+# --- LAN-режим на лету (команда в окно сервера) -------------------------------
+# Раньше для теста с телефона приходилось останавливать сервер и перезапускать
+# его с TL_SERVER_HOST=0.0.0.0 (плюс правка файрвола). Теперь можно просто
+# набрать в консольном окне запущенного сервера:  lanmode=1   (вкл.)
+# или  lanmode=0   (выкл., обратно только петля 127.0.0.1). Механика: отдельный
+# поток-читатель ждёт строки со stdin; при команде он поднимает ВТОРОЙ экземпляр
+# Flask-приложения на том же порту, но привязанный к 0.0.0.0 (все интерфейсы),
+# в собственном потоке — текущий цикл не прерывается, десктоп-клиент ничего не
+# замечает. Флаг _LAN_MODE отражает состояние; /api/server_info и подсказки в
+# консоли его учитывают. Выключение просит ОС закрыть listener (best-effort:
+# на Windows сокет чужого потока корректно не остановить, тогда LAN работает до
+# перезапуска — это честно напечатано в ответе команды).
+LAN_HOST = "0.0.0.0"          # только для env-режима при старте (TL_SERVER_HOST)
+_LAN_MODE = {"on": False, "ip": None}
+_LAN_SRV = None               # werkzeug server для shutdown из lanmode=0
+_EXIT_FLAG = {"bye": False}   # команда shutdown из окна -> чистый выход main-потока
+_RUN_DONE = {"done": False}   # app.run завершился сам (сигнал poke-потоку)
+_LAN_READY = threading.Event()  # сигнализация bind-успеха для читателя команд
+
+
+def _lan_admin_guard() -> bool:
+    """Разрешаем ли открывать LAN: нужен НЕдефолтный пароль админки либо
+    TL_ADMIN_TOKEN. Иначе /admin, регистрация и sync ушли бы всей Wi-Fi."""
+    token = ADMIN_TOKEN or (ADMIN_PASSWORD if ADMIN_PASSWORD != ADMIN_DEFAULT_PASS else "")
+    return bool(token)
+
+
+def _serve_lan(ip: str, port: int):
+    """Отдельный werkzeug-сервер в своём потоке, привязанный к КОНКРЕТНОМУ
+    LAN-адресу этого хоста (не 0.0.0.0!). Причина найдена E2E-тестом: на Linux
+    второй listener на том же порту невозможен даже с SO_REUSEPORT, если первый
+    слушает 127.0.0.1 (bind 0.0.0.0 даёт EADDRINUSE). Привязка к 192.168.x.y
+    адресов не пересекает — петля и LAN живут одновременно, десктоп-клиент
+    ничего не замечает. На Windows такого разделения тоже нет — там путь один:
+    рестарт с TL_SERVER_HOST=0.0.0.0 (сказано прямо в консоли)."""
+    from werkzeug.serving import make_server
+    global _LAN_SRV
+    try:
+        # ВАЖНО: у установленной версии werkzeug в сигнатуре make_server НЕТ
+        # параметра request_queue_size (проверено inspect.signature) — прошлая
+        # правка с ним падала TypeError на старте LAN-потока. Backlog здесь
+        # не критичен: threaded=True принимает соединения пулом потоков.
+        srv = make_server(ip, port, app, threaded=True)
+        _LAN_SRV = srv
+        # событие готовности ставим ДО serve_forever: слушатель уже создан и
+        # забинден внутри make_server, читатель команд ждёт именно этот сигнал,
+        # а не вслепую time.sleep (гонка на медленных машинах).
+        _LAN_READY.set()
+        srv.serve_forever()
+    except OSError as e:
+        print(f"[lan] не удалось слушать {ip}:{port}: {e}", flush=True)
+    except Exception as e:
+        # НЕ только OSError: при старте второго сервера вылетает и RuntimeError,
+        # и системный трейсбек (поймано E2E) — поток обязан dying gracefully.
+        print(f"[lan] слушатель упал при старте ({type(e).__name__}: {e}) — "
+              f"остался режим 127.0.0.1", flush=True)
+    finally:
+        _LAN_READY.set()      # разбудить читатель даже при неудаче
+        _LAN_MODE["on"] = False
+        _LAN_MODE["ip"] = None
+        _LAN_SRV = None
+        print("[lan] LAN-слушатель остановлен.", flush=True)
+
+
+def _console_commands(port: int):
+    """Поток-читатель stdin: команды окна сервера (см. выше)."""
+    for line in sys.stdin:
+        cmd = line.strip().lower()
+        if not cmd:
+            continue
+        if cmd in ("lanmode=1", "lan on", "lan"):
+            if _LAN_MODE["on"]:
+                print(f"[lan] уже включён: http://{_lan_ip()}:{port}", flush=True)
+                continue
+            if not _lan_admin_guard():
+                print("[lan] ОТКАЗ: пароль админки дефолтный и TL_ADMIN_TOKEN не задан.\n"
+                      "      Смени пароль в admin_credentials.json или запусти сервер\n"
+                      "      с TL_ADMIN_TOKEN=... , затем повтори lanmode=1.", flush=True)
+                continue
+            if os.name == "nt":
+                print("[lan] Windows: второй слушатель на том же порту невозможен.\n"
+                      "      Штатный способ LAN: перезапусти сервер с TL_SERVER_HOST=0.0.0.0\n"
+                      "      (и inbound-правило файрвола, см. README).", flush=True)
+                continue
+            ip = _lan_ip()
+            if not ip or ip.startswith("127."):
+                print("[lan] не нашёл LAN-адрес этого хоста — нет Wi-Fi/ETH? \n"
+                      "      Перезапусти с TL_SERVER_HOST=0.0.0.0 как запасной путь.", flush=True)
+                continue
+            _LAN_READY.clear()
+            t = threading.Thread(target=_serve_lan, args=(ip, port), daemon=True)
+            t.start()
+            ready = _LAN_READY.wait(timeout=10)
+            if ready and _LAN_SRV is not None and t.is_alive():
+                _LAN_MODE.update(on=True, ip=ip)  # флаг — только когда сервер реально поднялся
+                print(f"[lan] ВКЛЮЧЁН. Телефон (тот же Wi-Fi): http://{_lan_ip()}:{port}\n"
+                      f"      Не пускает? inbound-правило файрвола:\n"
+                      f'      netsh advfirewall firewall add rule name="threelanguage-lan"'
+                      f" dir=in action=allow protocol=TCP localport={port}", flush=True)
+            else:
+                print("[lan] слушатель не поднялся (порт занят?) — осталось 127.0.0.1", flush=True)
+        elif cmd in ("lanmode=0", "lan off"):
+            if not _LAN_MODE["on"]:
+                print("[lan] и так выключен (только 127.0.0.1)", flush=True)
+                continue
+            # shutdown() запускаем в ОТДЕЛЬНОМ потоке: он дергает join() на
+            # LAN-потоке, а читатель команд (мы) не должен ждать — иначе
+            # последующие строки stdin (shutdown) встанут в очередь за join.
+            # Флаг снимаем сразу: /api/server_info честно отражает состояние.
+            srv = _LAN_SRV
+            _LAN_MODE.update(on=False, ip=None)
+            if srv is not None:
+                threading.Thread(target=srv.shutdown, daemon=True).start()
+            print("[lan] ВЫКЛЮЧЕН, снова только 127.0.0.1.", flush=True)
+        elif cmd in ("help", "?"):
+            print("[cmd] команды окна: lanmode=1 | lanmode=0 | help | shutdown", flush=True)
+        elif cmd == "shutdown":
+            # Только unlink + флаг; выход — за main-потоком (_exit_watcher).
+            # srv.shutdown() отсюда НЕ вызывать: accept-loop LAN-потока сидит в
+            # select на слушающем сокете, request_queue_size=1, и join из
+            # shutdown() может взаимоблокироваться (поймано E2E: lanmode=0
+            # работал, а shutdown после него висел 15с). os._exit из этого
+            # потока тоже опасен — обрывает serve_forever с трейсбеком.
+            _EXIT_FLAG["bye"] = True
+            LOCK_FILE.unlink(missing_ok=True)
+            print("[i] остановка по команде из окна…", flush=True)
+        else:
+            print(f"[cmd] неизвестная команда: {cmd!r} (help — список)", flush=True)
+
 
 def _lan_ip() -> str:
     """Best-effort IPv4 этого хоста в LAN (для подсказок в консоли и API)."""
@@ -548,12 +677,17 @@ def api_server_info():
 
     Для теста с телефона: открой url из ответа на том же Wi-Fi. Поля host/lan_ip
     помогают понять, почему 127.0.0.1 не пускаетother девайс — сервер слушает петлю."""
+    lan_open = (_LAN_MODE["on"] or
+                HOST not in ("127.0.0.1", "localhost"))
     return jsonify({"app": "threelanguage-local", "host": HOST, "port": PORT,
-                    "lan_ip": _lan_ip() if HOST not in ("127.0.0.1", "localhost") else None,
-                    "url": f"http://{HOST}:{PORT}",
+                    "lan_mode": lan_open,
+                    "lan_ip": _lan_ip() if lan_open else None,
+                    "url": (f"http://{_lan_ip()}:{PORT}" if lan_open
+                            else f"http://{HOST}:{PORT}"),
                     "hint": ("сервер доступен только с этого ПК (127.0.0.1). "
-                             "Для телефона запусти с TL_SERVER_HOST=0.0.0.0"
-                             if HOST in ("127.0.0.1", "localhost")
+                             "Для телефона набери в окне сервера: lanmode=1 "
+                             "(или перезапусти с TL_SERVER_HOST=0.0.0.0)"
+                             if not lan_open
                              else f"открой http://{_lan_ip()}:{PORT} с телефона в том же Wi-Fi")})
 
 
@@ -985,6 +1119,104 @@ def _free_port(preferred: int, host: str = "127.0.0.1") -> int:
     raise SystemExit(f"Не нашёл свободный порт рядом с {preferred}")
 
 
+# ------------------------------------------------------------------ banner --
+# Цветной ASCII-дракон под строкой «Нажмите Ctrl+C для выхода». Flask сам
+# печатает "Press CTRL+C to quit" (EN) / русскую версию на Windows — мы не
+# трогаем его вывод, а рисуем свой баннер ПОВЕРХ: ANSI escape-коды работают в
+# cmd.exe/PowerShell (Windows 10+), Terminal и Linux/macOS. Где ANSI не
+# поддерживается (старые консоли) — print_ansi тихо отключается и дракон
+# остаётся монохромным: украшение не должно ломать утилитарный вывод сервера.
+DRAGON_BANNER = r"""
+                     )kk88)88)88kk)
+                     )DDAA?AA?AADD)
+        )PP)) )) ))PP)AAAAAAAAAAAA)PP))) )) )PP)
+        )kk88)88)88kk)AAr`rAAr`rAA)kk)88)88)8kk)
+        )AAAAAAAAAAAA)AArrrAArrrAA)AAAAAAAAAAAA)
+        )AArrrAArrrAA)AAA))))))AAA)AAArrrAArrrA)
+        )AArrrAArrrAA)AAAA)AA)AAAA)AAArrrAArrrA)
+        )AA,,,,,,AAAA)AAAAAAAAAAAA)AAAA,,,,,,AA)
+        )AAA4AA4AAAAA))))AAAAAA))))AAAAA4AA4AAA)
+        )AAAAAAAAAAAA)  )AAAAAA)  )AAAAAAAAAAAA)
+         ))))8888A)))   )AAAAAA)   )))A8888))))
+            )AAAAA)     )AAAAAA)     )AAAAA)
+            )AAAAA)))))))AAAAAA)))))))AAAAA)
+            )AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA)    ((((5(
+            )AAAAATTTTTTTTTTTTTTTTTTTTAAAAA)))))AAAAA)
+            )AAAAAiiiiiiiiiiiiiiiiiiiiAAAAAAAAAAAA>>>(
+            )AAAAAiiiiiiiiiiiiiiiiiiiiAAAAAAAAAAAA)
+            )AAAAAiiiiiiiiiiiiiiiiiiiiAAAAA)))))))
+            )AAAAAiiiiiiiiiiiiiiiiiiiiAAAAA)
+            (/,,,,,,,,,,,,,,,,,,,,,,,,,,,,/(
+               )AAAAAA)          )AAAAAA)
+               )AAAAAA)          )AAAAAA)
+               )AAAAAA)          )AAAAAA)
+""".strip("\n")
+
+# цвет каждого символа пиксель-арта: A=чешуя(красный), k=тёмно-красная окантовка,
+# P=шип(белый), D=глаз(жёлтый), ?=зрачок(чёрный), r=нотрицательная морда(оранж),
+# ,=брюхо(светло-красный), 4=ноздри, 8=теневые блоки, T/i=лапы, 5=>>=язык
+_DRAGON_COLORS = {
+    "A": "\033[38;5;167m",   # приглушённый красный (основная чешуя)
+    "k": "\033[38;5;88m",    # тёмный красный (контур головы/тела)
+    "P": "\033[97m",         # белый (шипы)
+    "D": "\033[93m",         # жёлтый (глаза)
+    "?": "\033[38;5;16m",    # почти чёрный (зрачки)
+    "r": "\033[38;5;209m",   # лосось (морда)
+    ",": "\033[38;5;210m",   # розовато-красный (брюшко)
+    "4": "\033[38;5;94m",    # коричневый (ноздри)
+    "8": "\033[38;5;131m",   # пыльно-красный (тени)
+    "T": "\033[38;5;168m",   # лапы светлее тела
+    "i": "\033[38;5;168m",
+    "(": "\033[38;5;88m", ")": "\033[38;5;88m", "/": "\033[38;5;88m",
+    "5": "\033[38;5;202m", ">": "\033[38;5;203m",  # огонь/язык — оранжевый
+    "`": "\033[38;5;210m",
+}
+
+
+def _supports_ansi() -> bool:
+    """Рисуем цвет только там, где его понимают. env NO_COLOR — общий стандарт
+    («не крась»), TERM=dumb — старые терминалы; в pipe (лог-файл) коды мусорят."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    term = os.environ.get("TERM", "")
+    if term in ("", "dumb") and os.name != "nt":
+        return False
+    return True
+
+
+def print_dragon_banner():
+    """Двухпроходный рендер: сначала проверка поддержки ANSI, потом печать."""
+    try:
+        lines = DRAGON_BANNER.splitlines()
+        if _supports_ansi():
+            out = []
+            for ln in lines:
+                buf = []
+                for ch in ln:
+                    c = _DRAGON_COLORS.get(ch)
+                    buf.append((c + ch + "\033[0m") if c else ch)
+                out.append("".join(buf))
+            text = "\n".join(out)
+        else:
+            text = "\n".join(lines)
+        print(text, flush=True)
+    except Exception:
+        pass   # баннер — украшение; падать из-за него сервер не имеет права
+
+
+def run_server_forever(host: str, port: int):
+    """app.run с перехватом Ctrl+C: Flask сам обработает KeyboardInterrupt и
+    выйдет штатно (сработает finally с unlink lock). Мы лишь печатаем баннер
+    ДО старта и прощание ПОСЛЕ. В потоке-обёртке не вызываем — только main."""
+    print_dragon_banner()
+    try:
+        app.run(host=host, port=port)
+    except KeyboardInterrupt:
+        print("\n[i] остановлено пользователем (Ctrl+C). Пока!", flush=True)
+
+
 if __name__ == "__main__":
     # Порт: TL_SERVER_PORT или 8765; если занят чужим процессом — автовыбор
     # следующего свободного + запись фактического порта в ~/.threelanguage/server_port,
@@ -1001,6 +1233,8 @@ if __name__ == "__main__":
                   "     Любое устройство в твоей Wi-Fi сможет зайти в /admin. Задай "
                   "TL_ADMIN_TOKEN или смени пароль, либо верни 127.0.0.1." % HOST)
     acquire_lock()
+    # Фактический порт выбираем ДО запуска читателя команд — подсказки в окне
+    # (и ответ lanmode=1) должны показывать именно его, а не желаемый.
     chosen = _free_port(PORT, HOST if HOST != "0.0.0.0" else "127.0.0.1")
     if chosen != PORT:
         print(f"[!] Порт {PORT} занят — использую {chosen}")
@@ -1072,7 +1306,46 @@ if __name__ == "__main__":
                 os._exit(0)
 
     threading.Thread(target=_watch_parent, daemon=True).start()
+    # Читатель команд окна сервера (lanmode=1 | lanmode=0 | help | shutdown).
+    # stdin может быть закрыт/неперенаправлен (запуск из GUI через Popen без
+    # PIPE) — поток это честно переживает и завершается.
     try:
-        app.run(host=HOST, port=chosen)
+        threading.Thread(target=_console_commands, args=(chosen,),
+                         daemon=True).start()
+        print('[i] команды окна сервера: lanmode=1 | lanmode=0 | help | shutdown')
+    except Exception:
+        pass
+
+    def _poke_loop():
+        """Команда shutdown ставит флаг. Раньше здесь был единственный poke
+        /health «в надежде», что main-поток проснётся между accept-циклами —
+        E2E показал: app.run сидит в select и не просыпается никогда, процесс
+        висел мёртвым грузом. Новая схема надёжна: после poke ждём реально
+        завершившийся app.run (флаг _RUN_DONE) ~5 секунд; если не дождались —
+        осознанный os._exit(0): все потоки сервера daemon, lock уже снят
+        читателем команд, данные на диске записаны атомарно. Терять при этом
+        нечего, а «заседающий python» — терять нельзя."""
+        import urllib.request
+        while not _EXIT_FLAG["bye"]:
+            time.sleep(0.3)
+        try:   # первый удар по loopback (основной слушатель)
+            urllib.request.urlopen(f"http://127.0.0.1:{chosen}/health", timeout=2).read()
+        except Exception:
+            pass
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not _RUN_DONE["done"]:
+            time.sleep(0.2)
+            try:   # повторные тычки: вдруг первый запрос утонул в очереди
+                urllib.request.urlopen(f"http://127.0.0.1:{chosen}/health", timeout=1).read()
+            except Exception:
+                break   # сокет закрыт — скорее всего app.run уже вышел
+        if not _RUN_DONE["done"]:
+            print("[i] основной цикл не проснулся — принудительный выход", flush=True)
+            LOCK_FILE.unlink(missing_ok=True)
+            os._exit(0)
+    threading.Thread(target=_poke_loop, daemon=True).start()
+    try:
+        run_server_forever(HOST, chosen)   # баннер-дракон + штатный выход по Ctrl+C
     finally:
-        LOCK_FILE.unlink(missing_ok=True)         # освобождаем место для перезапуска
+        _RUN_DONE["done"] = True                   # poke-поток узнает, что мы вышли сам
+        LOCK_FILE.unlink(missing_ok=True)          # освобождаем место для перезапуска
