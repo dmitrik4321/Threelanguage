@@ -1,2 +1,15 @@
-__pycache__/
 *.pyc
+__pycache__/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.env
+.env.local
+*.env.*
+
+# UserData: персональные журналы пользователей (не в git, README — исключение)
+UserData/*
+!UserData/README.md
