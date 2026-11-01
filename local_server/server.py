@@ -45,6 +45,27 @@ LOCK_FILE = Path.home() / ".threelanguage" / "server.lock"
 HB_PATH = Path.home() / ".threelanguage" / "server_hb"
 PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
 
+# Хост по умолчанию — 127.0.0.1 (петля): сервер принимает соединения только с
+# этого ПК, наружу ничего не торчит. TL_SERVER_HOST=0.0.0.0 открывает сервер в
+# LAN — для теста с телефона. ВНИМАНИЕ: вместе с /admin и sync/push наружу
+# уходит всё; при открытии в сети ОБЯЗАТЕЛЬНО задай TL_ADMIN_TOKEN или смени
+# пароль админки в admin_credentials.json (проверка и предупреждение в __main__).
+HOST = os.environ.get("TL_SERVER_HOST", "127.0.0.1")
+
+
+def _lan_ip() -> str:
+    """Best-effort IPv4 этого хоста в LAN (для подсказок в консоли и API)."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("10.255.255.255", 1))   # трафик не уходит, берёт src ip
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return "?"
+
 # ------------------------------------------------------------- UserData ----
 # Папка UserData: на КАЖДОГО пользователя — свой JSON-файл <username>.json.
 # Сервер пишет туда журнал по словам (word log): какие слова/фразы пользователь
@@ -521,6 +542,21 @@ def web_mascot(fname):
     return send_from_directory(MASCOT_DIR, fname)
 
 
+@app.get("/api/server_info")
+def api_server_info():
+    """Что видит клиент (десктоп/веб): фактический хост и LAN-адрес сервера.
+
+    Для теста с телефона: открой url из ответа на том же Wi-Fi. Поля host/lan_ip
+    помогают понять, почему 127.0.0.1 не пускаетother девайс — сервер слушает петлю."""
+    return jsonify({"app": "threelanguage-local", "host": HOST, "port": PORT,
+                    "lan_ip": _lan_ip() if HOST not in ("127.0.0.1", "localhost") else None,
+                    "url": f"http://{HOST}:{PORT}",
+                    "hint": ("сервер доступен только с этого ПК (127.0.0.1). "
+                             "Для телефона запусти с TL_SERVER_HOST=0.0.0.0"
+                             if HOST in ("127.0.0.1", "localhost")
+                             else f"открой http://{_lan_ip()}:{PORT} с телефона в том же Wi-Fi")})
+
+
 @app.get("/api/content/lesson")
 def content_lesson():
     """Живой урок из того же модуля, что использует десктоп (build/data_sources.py)."""
@@ -934,13 +970,13 @@ def shutdown():
 init_db()
 
 
-def _free_port(preferred: int) -> int:
-    """Первый свободный TCP-порт на 127.0.0.1, начиная с preferred."""
+def _free_port(preferred: int, host: str = "127.0.0.1") -> int:
+    """Первый свободный TCP-порт на host, начиная с preferred."""
     import socket
     for p in [preferred] + [preferred + i for i in range(1, 20)]:
         s = socket.socket()
         try:
-            s.bind(("127.0.0.1", p))
+            s.bind((host, p))
             return p
         except OSError:
             continue
@@ -953,14 +989,28 @@ if __name__ == "__main__":
     # Порт: TL_SERVER_PORT или 8765; если занят чужим процессом — автовыбор
     # следующего свободного + запись фактического порта в ~/.threelanguage/server_port,
     # чтобы десктоп-клиент сам нашёл сервер (см. build/sync_client.py).
+    # Для LAN (тест с телефона): TL_SERVER_HOST=0.0.0.0 TL_SERVER_PORT=8765;
+    # порт фиксируй явно — файл server_port лежит на ПК, с телефона его не видно.
+    # На Windows добавь inbound-правило файрвола:
+    #   netsh advfirewall firewall add rule name="threelanguage-lan" dir=in action=allow protocol=TCP localport=8765
+    if HOST not in ("127.0.0.1", "localhost"):
+        token = ADMIN_TOKEN or (ADMIN_PASSWORD if ADMIN_PASSWORD != ADMIN_DEFAULT_PASS else "")
+        if not token:
+            print("[!!] ВНИМАНИЕ: сервер открыт в сеть (TL_SERVER_HOST=%s), но TL_ADMIN_TOKEN "
+                  "не задан, а пароль админки — дефолтный из admin_credentials.json.\n"
+                  "     Любое устройство в твоей Wi-Fi сможет зайти в /admin. Задай "
+                  "TL_ADMIN_TOKEN или смени пароль, либо верни 127.0.0.1." % HOST)
     acquire_lock()
-    chosen = _free_port(PORT)
+    chosen = _free_port(PORT, HOST if HOST != "0.0.0.0" else "127.0.0.1")
     if chosen != PORT:
         print(f"[!] Порт {PORT} занят — использую {chosen}")
     PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
     PORT_FILE.write_text(str(chosen))
-    print(f"Threelanguage local server: http://127.0.0.1:{chosen}  "
-          f"(админка: http://127.0.0.1:{chosen}/admin)")
+    print(f"Threelanguage local server: http://{HOST}:{chosen}  "
+          f"(админка: http://{HOST}:{chosen}/admin)")
+    if HOST not in ("127.0.0.1", "localhost"):
+        print(f"[i] Доступ из сети: http://{_lan_ip()}:{chosen}  "
+              f"(если не пускает — проверь файрвол и совпадение Wi-Fi)")
 
     def _watch_parent():
         """Ребёнок не должен переживать родителя-приложение (осиротевший
@@ -1023,6 +1073,6 @@ if __name__ == "__main__":
 
     threading.Thread(target=_watch_parent, daemon=True).start()
     try:
-        app.run(host="127.0.0.1", port=chosen)
+        app.run(host=HOST, port=chosen)
     finally:
         LOCK_FILE.unlink(missing_ok=True)         # освобождаем место для перезапуска
