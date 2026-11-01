@@ -1206,15 +1206,94 @@ def print_dragon_banner():
         pass   # баннер — украшение; падать из-за него сервер не имеет права
 
 
+_ANSI_ON_WINDOWS_DONE = False
+
+
+def _enable_ansi_on_windows():
+    """Windows 10+ cmd/PowerShell понимают ANSI, но по умолчанию режим VT
+    выключен — включаем через kernel32.SetConsoleMode(ENABLE_VIRTUAL_TERMINAL_
+    PROCESSING). Если импортирован colorama — его init() делает то же самое,
+    используем что есть. Идемпотентно; на Linux/macOS no-op; при любой неудаче
+    просто молча остаёмся монохромными (баннер от этого не перестаёт печататься)."""
+    global _ANSI_ON_WINDOWS_DONE
+    if _ANSI_ON_WINDOWS_DONE or os.name != "nt":
+        return
+    _ANSI_ON_WINDOWS_DONE = True
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        for std in (-11, -12):   # stdout, stderr
+            h = k32.GetStdHandle(std)
+            mode = ctypes.c_ulong(0)
+            if k32.GetConsoleMode(h, ctypes.byref(mode)):
+                k32.SetConsoleMode(h, mode.value | 0x0004)
+    except Exception:
+        pass
+    try:
+        import colorama
+        colorama.just_fix_windows_console() if hasattr(colorama, "just_fix_windows_console") else colorama.init()
+    except Exception:
+        pass
+
+
+_BANNER_SHOWN = {"done": False}
+
+
+def _show_banner_once():
+    """Печатаем дракона ровно один раз за процесс (и в stdin-режиме, и после
+    poke-выхода не повторяем)."""
+    if _BANNER_SHOWN["done"]:
+        return
+    _BANNER_SHOWN["done"] = True
+    _enable_ansi_on_windows()
+    print_dragon_banner()
+
+
+def _banner_hook():
+    """Хук первого соединения + fallback-таймер.
+
+    Порядок строк в окне сервера должен быть: *Running on…* → *Press CTRL+C to
+    quit* → ДРАКОН. Но werkzeug печатает «Press CTRL+C» АСИНХРОННО: свой поток
+    report_startup_messages стартует внутри make_server/run_simple и может
+    выдать строку ПОЗЖЕ нашей печати (поймано E2E: баннер залезал между
+    «Running on» и «Press CTRL+C»). Поэтому баннер рисуем не до app.run, а
+    когда точно знаем, что запуск состоялся: первый входящий запрос (хук
+    before_request ниже) или истечение fallback-таймера (на случай сервера без
+    трафика). К этому моменту startup-сообщения werkzeug уже в буфере stdout —
+    порядок гарантирован.»"""
+    _show_banner_once()
+
+
+_FALLBACK_TIMER = threading.Timer(2.5, _banner_hook)
+
+
+@app.before_request
+def _banner_first_connection():
+    """Первое соединение с сервером = верный признак, что слушатель живой и
+    сообщения запуска напечатаны. Дальше хук бесполезен — снимаем себя."""
+    if not _BANNER_SHOWN["done"]:
+        _banner_hook()
+        try:
+            _FALLBACK_TIMER.cancel()
+        except Exception:
+            pass
+
+
 def run_server_forever(host: str, port: int):
     """app.run с перехватом Ctrl+C: Flask сам обработает KeyboardInterrupt и
-    выйдет штатно (сработает finally с unlink lock). Мы лишь печатаем баннер
-    ДО старта и прощание ПОСЛЕ. В потоке-обёртке не вызываем — только main."""
-    print_dragon_banner()
+    выйдет штатно (сработает finally с unlink lock). Баннер-дракон печатается
+    НЕ здесь, а по хуку первого соединения / fallback-таймеру (см.
+    _banner_hook — почему: werkzeug пишет своё «Press CTRL+C» позже нашего
+    print, если рисовать до app.run). Прощание — после выхода.
+    В потоке-обёртке не вызываем — только main."""
+    _FALLBACK_TIMER.daemon = True
+    _FALLBACK_TIMER.start()
     try:
         app.run(host=host, port=port)
     except KeyboardInterrupt:
         print("\n[i] остановлено пользователем (Ctrl+C). Пока!", flush=True)
+    finally:
+        _show_banner_once()   # даже при раннем падении: хоть что-то видно
 
 
 if __name__ == "__main__":
