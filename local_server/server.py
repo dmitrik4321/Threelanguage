@@ -347,7 +347,10 @@ def content_lesson():
     sys.path.insert(0, str(REPO_ROOT / "build"))
     try:
         import data_sources as ds
-        lesson = ds.build_lesson([l.strip() for l in langs])
+        # cached_build_lesson: кэш собранной колоды (TTL 1 час) + параллельные
+        # запросы к API — иначе первый холодный вызов вешает веб-клиент на
+        # десятки секунд (последовательные HTTP к Tatoeba с timeout 6с).
+        lesson = ds.cached_build_lesson([l.strip() for l in langs])
     except Exception as e:
         return jsonify({"error": f"content: {e}"}), 502
     return jsonify(lesson)
@@ -356,10 +359,17 @@ def content_lesson():
 @app.get("/api/content/placement")
 def content_placement():
     lang = request.args.get("lang") or "pt-BR"
+    # langs — список языков урока: из них берутся дистракторы-переводы
+    # (варианты должны быть на языке, ОТЛИЧНОМ от языка prompt — инвариант
+    # «отвечаемого вопроса», см. build/data_sources.placement_items).
+    langs = [x.strip() for x in (request.args.get("langs") or lang).split(",") if x.strip()]
+    if lang not in langs:
+        langs.insert(0, lang)
     sys.path.insert(0, str(REPO_ROOT / "build"))
     try:
         import data_sources as ds
-        items = ds.placement_items([lang])
+        # кэш + параллельные запросы (см. content_lesson выше)
+        items = ds.cached_placement_items(langs)
     except Exception as e:
         return jsonify({"error": f"content: {e}"}), 502
     return jsonify({"items": items})

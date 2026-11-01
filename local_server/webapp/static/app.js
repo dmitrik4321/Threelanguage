@@ -101,7 +101,7 @@ async function fetchLesson() {
 }
 async function fetchPlacement() {
   try {
-    const { json } = await api("/api/content/placement?lang=pt-BR", "GET", null, false);
+    const { json } = await api("/api/content/placement?lang=pt-BR&langs=en,pt-BR,zh", "GET", null, false);
     if (json && json.items && json.items.length >= 6) return json.items;
   } catch (e) { }
   return FALLBACK_PLACEMENT;
@@ -155,15 +155,41 @@ function showHome() {
 }
 
 async function startLesson() {
-  lessonLive = await fetchLesson();
+  // Живой контент строится на сервере из внешних API — это может быть долго.
+  // Показываем явный экран загрузки вместо «мёртвого» окна (жалоба: «во-первых
+  // долго»); server-side lesson-cache + параллельные HTTP сводят холодный путь
+  // к ~секундам, но UI обязан честно ждать и не выглядеть зависшим.
+  showLoading("Готовим живой урок…");
+  try {
+    lessonLive = await fetchLesson();
+  } finally { hideLoading(); }
   tasks = lessonLive.tasks; taskI = 0; sessionAnswers = [];
   showTask();
 }
 
 async function startPlacement() {
-  placementLive = await fetchPlacement();
+  showLoading("Готовим тест уровня…");
+  try {
+    placementLive = await fetchPlacement();
+  } finally { hideLoading(); }
   tasks = placementLive; taskI = 0; plResponses = [];
   showTask(true);
+}
+
+// ---------------------------------------------------------------- loading ----
+let _loadingOverlay = null;
+function showLoading(text) {
+  if (_loadingOverlay) return;
+  _loadingOverlay = el("div", { id: "loading-overlay" });
+  const box = el("div", { className: "card loadbox" });
+  box.append(el("div", { className: "spinner" }));
+  box.append(el("p", {}, text || "Загрузка…"));
+  box.append(el("p", { className: "dim" }, "контент берётся из открытых словарей — первый запрос может занять до минуты"));
+  _loadingOverlay.append(box);
+  document.body.append(_loadingOverlay);
+}
+function hideLoading() {
+  if (_loadingOverlay) { _loadingOverlay.remove(); _loadingOverlay = null; }
 }
 
 function taskHeader(c, t) {
@@ -379,7 +405,10 @@ document.addEventListener("visibilitychange", () => {
 for (const ev of ["pointerdown", "keydown"])
   document.addEventListener(ev, () => { idleSince = Date.now(); });
 setInterval(() => {
-  if (Date.now() - idleSince > IDLE_SLEEP_S * 1000) mood("sleep", "_idle");
+  // AFK-визуал: сонный дракон. "_idle" — отладочная подпись, в UI её быть не
+  // должно (замечание Квена Старшего): показываем человекочитаемо и только
+  // когда пользователь реально бездействует.
+  if (Date.now() - idleSince > IDLE_SLEEP_S * 1000) mood("sleep", "нет активности");
 }, 5000);
 
 // ---------------------------------------------------------------- boot ----
