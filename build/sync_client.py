@@ -17,9 +17,23 @@ import urllib.error
 import urllib.request
 
 PORT_FILE = os.path.join(os.path.expanduser("~"), ".threelanguage", "server_port")
+HOST_FILE = os.path.join(os.path.expanduser("~"), ".threelanguage", "server_host")
 DEFAULT_PORT = 8765
 CANDIDATE_PORTS = [DEFAULT_PORT, 8766, 8767, 8768]
 TIMEOUT = 4.0
+
+
+def _host_from_file() -> str | None:
+    """Хост, на котором сервер реально доступен (пишет app.py при LAN-запуске).
+
+    Нужен для TL_SERVER_HOST=0.0.0.0: тогда сервер слушает не только петлю,
+    и клиент должен бить на LAN-ip машины, а не на 127.0.0.1."""
+    try:
+        with open(HOST_FILE) as f:
+            h = f.read().strip()
+        return h if h and len(h) < 128 else None
+    except Exception:
+        return None
 
 
 def _port_from_file() -> int | None:
@@ -34,7 +48,14 @@ def _port_from_file() -> int | None:
 class SyncClient:
     def __init__(self, base: str | None = None):
         self._explicit = base is not None
-        self.base = (base or f"http://127.0.0.1:{_port_from_file() or DEFAULT_PORT}").rstrip("/")
+        # TL_SERVER_URL — явный override (например http://192.168.1.5:8765 для
+        # теста с телефона / сервера на другой машине). Без него: хост из
+        # server_host-файла (пишется при LAN-запуске) или 127.0.0.1 + порт из
+        # port-файла/кандидатов.
+        env_base = os.environ.get("TL_SERVER_URL", "").strip()
+        host = _host_from_file() or "127.0.0.1"
+        self.base = (base or env_base
+                     or f"http://{host}:{_port_from_file() or DEFAULT_PORT}").rstrip("/")
         self.token: str | None = None
         self.username: str | None = None
 

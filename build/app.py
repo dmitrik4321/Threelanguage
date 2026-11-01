@@ -858,6 +858,15 @@ class App:
                 else:
                     kwargs = {"start_new_session": True}
                 env = dict(os.environ, TL_PARENT_PID=str(os.getpid()), TL_GUI_APP="1")
+                # Если GUI-сессии задан LAN-хост (TL_SERVER_HOST=0.0.0.0),
+                # запоминаем его в ~/.threelanguage/server_host — клиент
+                # SyncClient будет бить на этот адрес вместо 127.0.0.1.
+                lan_host = (os.environ.get("TL_SERVER_HOST") or "").strip()
+                if lan_host and lan_host not in ("127.0.0.1", "localhost"):
+                    try:
+                        (log_path.parent / "server_host").write_text(lan_host)
+                    except OSError:
+                        pass
                 # явный pid родителя: сервер сам завершится, когда GUI закрыт
                 subprocess.Popen([sys.executable, str(server_py)],
                                  stdout=logf, stderr=logf, cwd=str(server_py.parent),
