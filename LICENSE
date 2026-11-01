@@ -1,0 +1,134 @@
+Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+
+This work is licensed under the Creative Commons Attribution-NonCommercial
+4.0 International License. To view a copy of this license, visit
+https://creativecommons.org/licenses/by-nc/4.0/ or send a letter to
+Creative Commons, PO Box 1866, Mountain View, CA 94042, USA.
+
+=== NOTE / ЗАМЕЧАНИЕ ПО ОБЪЁМУ ЛИЦЕНЗИИ ===
+
+Threelanguage — исходный код (код приложения, скрипты, документация и
+ассеты, созданные в рамках проекта) распространяется под CC BY-NC 4.0:
+вы можете свободно копировать, изменять и распространять материал для
+НЕКОММЕРЧЕСКИХ целей с указанием авторства.
+
+Третьесторонние данные под другими свободными лицензиями остаются под СВОИМИ
+лицензиями и НЕ перелицензируются этим файлом:
+ * Tatoeba sentences (https://tatoeba.org) — CC BY 2.0 FR;
+ * Wiktionary definitions (https://en.wiktionary.org) — CC BY-SA 4.0.
+Живые данные загружаются локальным сервером через их публичные REST API без
+ключей; кэш — ~/.threelanguage/content_cache.json.
+
+Полный юридический текст лицензии CC BY-NC 4.0 доступен по ссылке выше и
+приведён ниже для удобства офлайн-ознакомления.
+
+------------------------------------------------------------
+
+Creative Commons Corporation ("Creative Commons") is not a law firm and
+does not provide legal services or legal advice. Distribution of
+Creative Commons public licenses does not create a lawyer-client or
+other relationship. Creative Commons makes its licenses and related
+information available on an "as-is" basis. Creative Commons gives no
+warranties regarding its licenses, any material licensed under their
+terms and conditions, or any related information. Creative Commons
+disclaims all liability for damages resulting from their use to the
+fullest extent possible.
+
+CC BY-NC 4.0 LEGAL CODE (summary of the operative terms)
+
+Section 1 – License Grant and Scope.
+Subject to the terms and conditions of this Public License, the Licensor
+hereby grants You a worldwide, royalty-free, non-exclusive, irrevocable,
+perpetual license to Share and Adapt the Licensed Material for
+NONCOMMERCIAL purposes only, including the right to:
+ a. reproduce and Share the Licensed Material, in whole or in part; and
+ b. produce, reproduce, and Share Adapted Material.
+For the avoidance of doubt: producers of phonograms and performers may
+authorize Use by Others even if the recording or performance itself would
+otherwise be NonCommercial.
+
+Section 2 – Exceptions and Limitations.
+Fair uses, other exceptions and limitations to copyright (fair dealing,
+etc.) are unaffected: this license does not limit them. If an exception
+applies, you do not need to comply with the conditions, but must still
+follow the rules for Source and Notice if you Share the material.
+
+Section 3 – License Conditions.
+Your exercise of the rights is expressly made subject to:
+ a. ATTRIBUTION. If You Share the Licensed Material (including in
+  modified form), You must:
+  1. retain the following if it is supplied: identification of the
+     creator(s) and others designated to receive attribution; a copyright
+     notice; a notice referring to this Public License; a notice of the
+     disclaimer of warranties; a URI or hyperlink to the Licensed
+     Material to the extent reasonably practicable; indicate if You
+     modified the material and retain an indication of previous
+     modifications; and indicate the material is licensed under this
+     Public License (including the name, text, or URI/hyperlink).
+  2. remove the above information if requested and reasonably practicable.
+  3. if You modify/reuse, include a notice stating that you used the
+     material under this Public License, with a description of
+     modifications and identification of the original owner/author.
+  These conditions may be satisfied in any reasonable manner if any
+  medium, manner or implementation specified by the Licensor is followed.
+ b. NONCOMMERCIAL USE. You may not use the Licensed Material for primary
+  purpose of, or directed towards, commercial advantage or private
+  monetary compensation. Digital file sharing for free receipt of the
+  material is not, by itself, commercial use where there is no
+  consideration in exchange for the material.
+ c. SA (share-alike) does NOT apply to this BY-NC license; however, if
+  Adapted Material incorporates third-party CC BY-SA content (e.g.
+  Wiktionary definitions), THAT content's share-alike terms continue to
+  govern the relevant portions.
+ d. You may satisfy the conditions in Section 3(a) in any reasonable
+  manner based on the medium, manner and circumstances in which You
+  Share. For example, reasonable compliance may require supplying at
+  least the URI or hyperlink associated with the Licensed Material.
+
+Section 4 – Sui Generis Database Rights.
+Where the Licensed Material includes database rights, if You Extract,
+reproduce (in whole or substantial part) and Share database contents,
+then You are subject to the conditions of Section 3(a); You must not
+effectively prevent others from exercising the rights granted; and You
+must not use the material in a way that would imply that Your use of the
+database is endorsed by the producer of the database.
+
+Section 5 – Disclaimer of Warranties and Limitation of Liability.
+Unless otherwise separately undertaken by the Licensor, the Licensed
+Material is offered AS IS and AS AVAILABLE, with no representations or
+warranties of any kind concerning the Licensed Material, whether
+express, implied, statutory, or other. The Licensor disclaims all
+liability for loss, costs, expense or damage arising from use of this
+license or the Licensed Material, to the extent allowed by law.
+
+Section 6 – Term.
+The term is specified in Section 7(a). Creative Commons may publish
+later versions; You may always continue using the version under which
+You received the material.
+
+Section 7 – Termination.
+a. This Public License and the rights granted under it terminate
+automatically upon Your breach of any of its terms.
+b. If You remedy a violation within 30 days of discovery, the license
+reinstates provisionally until the Licensor decides whether to reinstate
+definitively; reinstatement does not affect third parties' rights who
+received the material from You before termination.
+c. No other terms are affected; termination does not automatically
+terminate licenses of downstream recipients who have complied.
+d. Questions about possible misuse of this license may be reported to
+the appropriate Creative Commons entity.
+
+Section 8 – Interpretation.
+This license shall not be construed as reducing or restricting fair use
+or other exceptions; if provisions are unenforceable they shall be
+reformed to make them enforceable consistent with intent; no term may be
+waived without consent; nothing limits lawful governmental or public
+interest uses.
+
+Creative Commons Notice
+This Public License contains the full and complete statement of the
+offer and conditions under which the Licensed Material may be used.
+Creative Commons is not a party to its public licenses and assumes no
+responsibility for the material. It provides its licenses for public
+consultation only; it is not responsible for any damages arising out of
+their use.
