@@ -270,7 +270,11 @@ function gradeAnswer(correct, isPlacement, clickedIdx) {
   else grade = (correct >= 1 && active < 5000) ? 4 : correct >= 0.999 ? 3 : correct >= 0.5 ? 2 : 1;
   const cid = currentTask.id || `${lessonLive.id}:${taskI}`;
   const card = C.newCard(st.cards[cid]);
-  st.cards[cid] = C.nextState(card, grade, nowMs);
+  // UserData-журнал сервера: last_grade + реестр слов (см. server.py::_compute_userdata)
+  st.cards[cid] = Object.assign(C.nextState(card, grade, nowMs), { last_grade: grade });
+  (st.words = st.words || {})[cid] = {
+    text: currentTask._tgt_text || currentTask.prompt,
+    lang: currentTask.lang, source: currentTask.source, license: currentTask.license };
   sessionAnswers.push({ kind, correct, active_ms: active, afk_excluded: verdict.afk_suspect,
     too_fast: active < 700, hint_used: false, skipped: false, replays: 0, self_corrected: 0 });
   st.minutes[langOfCurrent] = (st.minutes[langOfCurrent] || 0) + verdict.weight_ms / 60000;
@@ -392,7 +396,10 @@ $("#btn-sync").onclick = async () => {
         Object.assign(st, remote); saveState(st);
       }
     }
-    updateDashboard(); toast("Синхронизировано ✓", "var(--green)");
+    // UserData-журнал сервера: сводка по словам (сколько знаем/ошибались).
+    // Push отвечает {userdata:{words,known,errors}} — показываем её в тосте.
+    const ud = push.json.userdata;
+    updateDashboard(); toast(ud ? `Синхронизировано ✓ · слов ${ud.words}, известно ${ud.known}` : "Синхронизировано ✓", "var(--green)");
   } else toast(push.json.error || "сервер недоступен", "var(--red)");
 };
 

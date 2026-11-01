@@ -90,6 +90,11 @@ def default_state() -> dict:
         "level": None,
         "settings": {"theme": "dark", "ui_lang": "ru"},
         "account": {"username": None, "token": None},
+        # Реестр слов для UserData-журнала сервера (см. local_server/server.py):
+        # card_id -> {text, lang, source, license}. Клиент докладывает данные
+        # каждой показанной карточки при push — так сервер знает, ЧТО за слово
+        # стоит за хэшем id, без обращения к внешним API.
+        "words": {},
     }
 
 
@@ -557,6 +562,7 @@ class App:
 
     def record_answer(self, correct: float):
         self._lock = True
+        t = self.current_task   # задание нужно ниже для реестра слов UserData
         end_rel = int((time.time() - self.task_start_wall) * 1000)
         active = core.active_ms_from_events(self.task_events, end_rel)
         kind = self.current_task["kind"]
@@ -575,7 +581,16 @@ class App:
             grade = (4 if correct >= 1 and active < 5000 else
                      3 if correct >= 0.999 else 2 if correct >= 0.5 else 1)
         newcard = core.next_state(card, grade, now_ms)
-        self.st["cards"][cid] = newcard.__dict__
+        cd = dict(newcard.__dict__)
+        # UserData-журнал сервера читает last_grade (верно/неверно) и реестр
+        # слов words{} — см. local_server/server.py::_compute_userdata.
+        cd["last_grade"] = grade
+        self.st["cards"][cid] = cd
+        self.st.setdefault("words", {})[cid] = {
+            "text": t.get("_tgt_text") or t.get("prompt"),
+            "lang": t.get("lang"),
+            "source": t.get("source"),
+            "license": t.get("license")}
 
         self.session_answers.append(core.AnswerRecord(
             kind=kind, correct=correct, active_ms=active,

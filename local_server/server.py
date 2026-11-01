@@ -44,6 +44,187 @@ PORT_FILE = Path.home() / ".threelanguage" / "server_port"
 LOCK_FILE = Path.home() / ".threelanguage" / "server.lock"
 HB_PATH = Path.home() / ".threelanguage" / "server_hb"
 PORT = int(os.environ.get("TL_SERVER_PORT", "8765"))
+
+# ------------------------------------------------------------- UserData ----
+# Папка UserData: на КАЖДОГО пользователя — свой JSON-файл <username>.json.
+# Сервер пишет туда журнал по словам (word log): какие слова/фразы пользователь
+# знает на каких языках, сколько раз слово спрашивали, сколько раз ошибся,
+# какой был последний ответ (верно/неверно) и когда. Это «человекочитаемая»
+# копия прогресса: states в SQLite — слепок клиента (машина), UserData —
+# накопительный журнал (его можно открыть глазами, отдать тренеру, смержить
+# с другого устройства). Писается при каждом успешном /api/sync/push из
+# diff-состояния; TL_USERDATA_DIR перебивает путь (для тестов изоляции).
+USERDATA_DIR = Path(os.environ.get(
+    "TL_USERDATA_DIR", str(Path(__file__).resolve().parent.parent / "UserData")))
+
+
+def _userdata_path(username: str) -> Path:
+    """Путь к файлу пользователя; имя санитизируем — username уже lower-strip
+    на register, но defense-in-depth: только [a-z0-9_.-], иначе '_'."""
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", username)[:64] or "anon"
+    return USERDATA_DIR / f"{safe}.json"
+
+
+def _empty_userdata(username: str) -> dict:
+    return {"username": username, "updated_at": None, "words": {}}
+
+
+def load_userdata(username: str) -> dict:
+    p = _userdata_path(username)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("words"), dict):
+            # на диске langs хранится списком (JSON не умеет множества), а
+            # _compute_userdata работает с set — восстанавливаем тип при загрузке
+            for w in data["words"].values():
+                if isinstance(w.get("langs"), list):
+                    w["langs"] = set(w["langs"])
+            return data
+    except Exception:
+        pass
+    return _empty_userdata(username)
+
+
+def update_userdata_from_state(username: str, state: dict) -> dict | None:
+    """Точка входа из push(): считает журнал и, если есть изменения, пишет
+    файл UserData/<username>.json. Возвращает журнал (или None, если карточек
+    в состоянии нет)."""
+    ud = _compute_userdata(username, state, load_userdata(username))
+    if ud is None:
+        return None
+    # запись на диск только если счётки реально двинулись (_dirty ставит
+    # _compute_userdata); повторный identical-push не трогает файл
+    if ud.pop("_dirty", False):
+        ud["updated_at"] = int(time.time())
+        ud["level"] = state.get("level")
+        ud["minutes"] = state.get("minutes", {})
+        try:
+            USERDATA_DIR.mkdir(parents=True, exist_ok=True)
+            out = json.dumps(_userdata_serializable(ud), ensure_ascii=False, indent=2)
+            path = _userdata_path(username)
+            # атомарная запись: temp+os.replace. Если содержимое совпадает с
+            # уже лежащим на диске — файл НЕ перезаписываем (identical-push
+            # не двигает mtime; os.replace всегда обновляет мету времени)
+            try:
+                if path.read_text(encoding="utf-8") == out:
+                    return ud
+            except OSError:
+                pass
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(out, encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass  # журнал — best effort, sync push от него не зависит
+    return ud
+
+
+def _compute_userdata(username: str, state: dict, base: dict | None = None) -> dict | None:
+    """Чистая функция: обновляет журнал-словарь по пушнутому состоянию клиента
+    (ничего не пишет на диск; флаг "_dirty" говорит, изменилось ли что-то).
+
+    state — схема build/app.py default_state(): cards{cid -> SRS-стейт},
+    minutes{lang}, history[], level... Из неё нам нужны карточки: cid несёт
+    стабильный id фразы ("tat:<hash>" из data_sources), а текст фразы живёт
+    в words {cid -> {text, lang, source, license}} того же состояния (перед
+    push клиент докладывает туда данные каждой показанной карточки — так
+    сервер понимает, ЧТО именно за слово стоит за хэшем, без обращения к
+    внешним API).
+
+    Для каждой карточки в журнале:
+      asks   — сколько раз слово вообще спрашивали (reps в SRS);
+      errors — сколько раз ошиблись (lapses — накопленные провалы судит ядро);
+      last_correct — последний ответ верно/неверно (grade>=3 => верно);
+      langs  — на каких языках пользователь это слово знает (lang карточки);
+      text/source/license — сама фраза и происхождение (CC-BY атрибуция).
+    Фолбэк без слов: если words[cid] нет (клиент старой версии), пишем
+    запись с text=null — счётчики всё равно корректны."""
+    cards = state.get("cards")
+    if not isinstance(cards, dict) or not cards:
+        return None
+    words_meta = state.get("words") if isinstance(state.get("words"), dict) else {}
+    ud = base if base is not None else _empty_userdata(username)
+    ud.setdefault("words", {})
+    dirty = False
+    for cid, c in cards.items():
+        if not isinstance(c, dict):
+            continue
+        meta = words_meta.get(cid) or {}
+        w = ud["words"].get(cid)
+        if w is None:
+            w = {"text": meta.get("text"), "lang": meta.get("lang"),
+                 "langs": set([meta.get("lang")]) if meta.get("lang") else set(),
+                 "asks": 0, "errors": 0, "last_correct": None, "last_ts": None}
+            ud["words"][cid] = w
+            dirty = True
+        # defense-in-depth: журнал, сохранённый старой версией сервера, мог
+        # лежать на диске с langs-списком — приводим к set до первого .add()
+        if not isinstance(w.get("langs"), set):
+            w["langs"] = set(w.get("langs") or [])
+        # накапливаемые поля берём максимумом: push приходит полным слепком,
+        # повторный push того же состояния не должен удваивать счётчики
+        reps = int(c.get("reps") or 0)
+        lapses = int(c.get("lapses") or 0)
+        if reps > (w.get("asks") or 0):
+            w["asks"] = reps
+            dirty = True
+        if lapses > (w.get("errors") or 0):
+            w["errors"] = lapses
+            dirty = True
+        # последний ответ: грейд в SRS-стейте не хранится напрямую — клиент
+        # кладёт в слепок поле last_grade (1..4) для cid
+        lg = c.get("last_grade")
+        if lg is not None and int(lg) != w.get("_last_grade_raw"):
+            w["last_correct"] = bool(int(lg) >= 3)   # Again=1 Hard=2 Good=3 Easy=4
+            w["_last_grade_raw"] = int(lg)
+            w["last_ts"] = int(time.time())
+            dirty = True
+        if meta.get("lang"):
+            before = len(w["langs"])
+            w["langs"].add(meta["lang"])
+            dirty = dirty or len(w["langs"]) != before
+        if meta.get("text") and w.get("text") != meta["text"]:
+            w["text"] = meta["text"]
+            w["source"], w["license"] = meta.get("source"), meta.get("license")
+            dirty = True
+    ud["_dirty"] = dirty
+    return ud
+
+
+def _userdata_serializable(ud: dict) -> dict:
+    """set -> sorted list (JSON не умеет множества), служебное _last_grade_raw
+    наружу не отдаём."""
+    o = dict(ud)
+    ws = {}
+    for cid, w in ud["words"].items():
+        w2 = {k: v for k, v in w.items() if not k.startswith("_")}
+        w2["langs"] = sorted(w.get("langs", []))
+        ws[cid] = w2
+    o["words"] = ws
+    return o
+
+
+def _userdata_stats(ud: dict | None) -> dict:
+    """Сводка журнала для ответа push и админки: сколько слов в работе,
+    сколько «известно» (отвечали верно >=2 раз и ни одного незакрытого провала),
+    сколько ошибок суммарно. Считается от счётков asks/errors/last_correct —
+    тех самых полей, которые просил хозяин."""
+    if not ud:
+        return {"words": 0, "known": 0, "errors": 0}
+    known = 0
+    errors = 0
+    for w in ud.get("words", {}).values():
+        a = int(w.get("asks") or 0)
+        e = int(w.get("errors") or 0)
+        errors += e
+        if a >= 2 and ud_ok_word(a, e):
+            known += 1
+    return {"words": len(ud.get("words", {})), "known": known, "errors": errors}
+
+
+def ud_ok_word(asks: int, errors: int) -> bool:
+    """Слово считается «известным», если спрашивали >=2 раза и доля ошибок
+    не больше трети (эвристика журнала; SRS-решение принимает ядро, не журнал)."""
+    return errors * 3 <= asks
 # --------------------------------------------------------- админ-доступ ----
 # Учётные данные админки лежат в ФАЙЛЕ КОНФИГА В КОРНЕ репозитория:
 #   admin_credentials.json  ->  {"username": "admin", "password": "..."}
@@ -509,7 +690,20 @@ def push():
     with db() as con:
         con.execute("INSERT OR REPLACE INTO states VALUES(?,?,?)",
                     (u["id"], json.dumps(body, ensure_ascii=False), int(time.time())))
-    return jsonify({"ok": True, "bytes": len(json.dumps(body))})
+    # UserData-журнал: человекочитаемая копия прогресса по словам
+    # (<папка>/UserData/<username>.json). Best effort — ошибка журнала не
+    # должна ломать синхронизацию клиента.
+    ud_stats = None
+    try:
+        ud = update_userdata_from_state(u["username"], body)
+        if ud:
+            ud_stats = _userdata_stats(ud) | {"file": str(_userdata_path(u["username"]))}
+    except Exception as e:
+        app.logger.warning("userdata update failed: %s", e)
+    resp = {"ok": True, "bytes": len(json.dumps(body))}
+    if ud_stats:
+        resp["userdata"] = ud_stats
+    return jsonify(resp)
 
 
 @app.get("/api/sync/pull")
