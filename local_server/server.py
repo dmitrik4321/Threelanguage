@@ -216,7 +216,7 @@ def _userdata_path(username: str) -> Path:
 
 
 def _empty_userdata(username: str) -> dict:
-    return {"username": username, "updated_at": None, "words": {}}
+    return {"username": username, "updated_at": None, "words": {}, "answers": []}
 
 
 def load_userdata(username: str) -> dict:
@@ -224,6 +224,9 @@ def load_userdata(username: str) -> dict:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         if isinstance(data, dict) and isinstance(data.get("words"), dict):
+            # defense-in-depth: файл мог быть создан версией без поля answers
+            if not isinstance(data.get("answers"), list):
+                data["answers"] = []
             # на диске langs хранится списком (JSON не умеет множества), а
             # _compute_userdata работает с set — восстанавливаем тип при загрузке
             for w in data["words"].values():
@@ -323,11 +326,40 @@ def _compute_userdata(username: str, state: dict, base: dict | None = None) -> d
         # последний ответ: грейд в SRS-стейте не хранится напрямую — клиент
         # кладёт в слепок поле last_grade (1..4) для cid
         lg = c.get("last_grade")
-        if lg is not None and int(lg) != w.get("_last_grade_raw"):
+        # base-журнал мог прийти с диска (load_userdata), где "_last_grade_raw"
+        # не сериализуется (_userdata_serializable отбрасывает поля '_') —
+        # восстанавливаем его из last_correct/grade до первого сравнения.
+        # Иначе ПЕРВЫЙ identical-push после рестарта сервера считает известный
+        # грейд «новым» и удваивает журнал answers. Если в журнале есть grade —
+        # берём его точно (иначе Again/Hard дали бы last_correct=False -> 1, а
+        # Hard=2 ложно считался бы новым ответом).
+        if "_last_grade_raw" not in w and w.get("last_correct") is not None:
+            w["_last_grade_raw"] = int(w["grade"]) if isinstance(
+                w.get("grade"), int) else (3 if w["last_correct"] else 1)
+        grade_changed = lg is not None and int(lg) != w.get("_last_grade_raw")
+        if grade_changed:
             w["last_correct"] = bool(int(lg) >= 3)   # Again=1 Hard=2 Good=3 Easy=4
             w["_last_grade_raw"] = int(lg)
             w["last_ts"] = int(time.time())
             dirty = True
+        # журнал последних ответов (хвост <= 50): текст + вер/невер + языки.
+        # Пишется ТОЛЬКО когда last_grade двинулся (тот же guard, что выше) —
+        # повторный identical-push не плодит дублей и не двигает mtime файла.
+        if grade_changed:
+            # last_grade в SRS-стейте — НАКОПЛЕННОЕ (не сбрасывается между
+            # ответами), поэтому guard по одному лишь значению не спасает от
+            # дублей при повторе того же грейда. Параноидальная защита: не
+            # пишем запись, если хвост журнала — уже такой же (cid, grade).
+            ans = ud.setdefault("answers", [])
+            last = ans[-1] if ans else None
+            if not (last and last.get("cid") == cid and last.get("grade") == int(lg)):
+                ans.append({"cid": cid,
+                            "text": meta.get("text") or w.get("text"),
+                            "correct": bool(int(lg) >= 3),
+                            "grade": int(lg),
+                            "langs": sorted(w.get("langs", [])),
+                            "ts": w.get("last_ts")})
+                dirty = True
         if meta.get("lang"):
             before = len(w["langs"])
             w["langs"].add(meta["lang"])
@@ -350,6 +382,11 @@ def _userdata_serializable(ud: dict) -> dict:
         w2["langs"] = sorted(w.get("langs", []))
         ws[cid] = w2
     o["words"] = ws
+    # журнал ответов: только хвост (<=50) и без внутренних пометок
+    ans = [a for a in ud.get("answers", []) if isinstance(a, dict)][-50:]
+    o["answers"] = [{"text": a.get("text"), "correct": a.get("correct"),
+                     "grade": a.get("grade"), "langs": a.get("langs") or [],
+                     "ts": a.get("ts")} for a in ans]
     return o
 
 
@@ -691,10 +728,42 @@ def api_server_info():
                              else f"открой http://{_lan_ip()}:{PORT} с телефона в том же Wi-Fi")})
 
 
+def _split_langs(raw: str, default: list[str]) -> list[str]:
+    """Список языков из query-параметра. Разделитель — точка с запятой
+    («pt-BR» содержит дефис, но главное — старые клиенты резали по ',' и
+    серв получал "pt"+"BR"). Для обратной совместимости запятая тоже
+    поддерживается, а типичная поломка "en,pt,BR" склеивается обратно в
+    "pt-BR". Неизвестные коды молча проходить не должны: если после разбора
+    не осталось НИ ОДНОГО известного языка (en/pt-BR/zh) — берём дефолт."""
+    known = {"en", "pt-BR", "zh"}
+    regions = {"BR", "TW", "CN", "PT", "US", "GB"}   # 2-буквенные заглавные региональные хвосты
+    if not raw:
+        return list(default)
+    parts = [p.strip() for p in raw.split(";")] if ";" in raw \
+        else [p.strip() for p in raw.split(",")]
+    parts = [p for p in parts if p]
+    fixed: list[str] = []
+    skip_next = False
+    for i, p in enumerate(parts):
+        if skip_next:
+            skip_next = False
+            continue
+        base = p.split("-")[0].lower()
+        nxt = parts[i + 1] if i + 1 < len(parts) else ""
+        # «pt» + «BR» -> «pt-BR»: одиночный код без региона, следом голый регион
+        if "-" not in p and base in ("pt", "zh", "es", "fr") and nxt.upper() in regions:
+            fixed.append(f"{base}-{nxt}"); skip_next = True
+            continue
+        fixed.append(p)
+    if not any(f in known for f in fixed):
+        return list(default)                      # мусор вместо уроков — не отдаём
+    return fixed
+
+
 @app.get("/api/content/lesson")
 def content_lesson():
     """Живой урок из того же модуля, что использует десктоп (build/data_sources.py)."""
-    langs = (request.args.get("langs") or "en,pt-BR,zh").split(",")
+    langs = _split_langs(request.args.get("langs"), ["en", "pt-BR", "zh"])
     sys.path.insert(0, str(REPO_ROOT / "build"))
     try:
         import data_sources as ds
@@ -874,6 +943,23 @@ def push():
     if ud_stats:
         resp["userdata"] = ud_stats
     return jsonify(resp)
+
+
+@app.get("/api/userdata")
+def api_userdata():
+    """Журнал последних ответов пользователя (человекочитаемая копия прогресса).
+
+    Читает UserData/<username>.json — то, что пишет push() после каждого
+    успешного /api/sync/push. Пустой/несуществующий файл отдаётся как пустой
+    журнал (200), а не ошибка — экран «Пока пусто» честнее 404.
+    """
+    u = current_user()
+    if u is None:
+        return jsonify({"error": "no auth"}), 401
+    ud = load_userdata(u["username"])
+    out = _userdata_serializable(ud)
+    out.setdefault("answers", [])
+    return jsonify(out)
 
 
 @app.get("/api/sync/pull")

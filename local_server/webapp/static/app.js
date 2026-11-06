@@ -92,16 +92,21 @@ function updateDashboard() {
 }
 
 // ----------------------------------------------------------- живой контент ----
+// Разделитель списков языков в URL — точка с запятой: «pt-BR» нельзя резать
+// по запятой (сервер получал "pt"+"BR" и молча строил пустой контент).
+// Заодно сервер понимает оба варианта — см. _split_langs() в server.py.
+const LANGS_QS = "en;pt-BR;zh";
+
 async function fetchLesson() {
   try {
-    const { json } = await api("/api/content/lesson?langs=en,pt-BR,zh", "GET", null, false);
+    const { json } = await api("/api/content/lesson?langs=" + LANGS_QS, "GET", null, false);
     if (json && json.tasks && json.tasks.length) return json;
   } catch (e) { /* офлайн — fallback ниже */ }
   return FALLBACK_LESSON;
 }
 async function fetchPlacement() {
   try {
-    const { json } = await api("/api/content/placement?lang=pt-BR&langs=en,pt-BR,zh", "GET", null, false);
+    const { json } = await api("/api/content/placement?lang=pt-BR&langs=" + LANGS_QS, "GET", null, false);
     if (json && json.items && json.items.length >= 6) return json.items;
   } catch (e) { }
   return FALLBACK_PLACEMENT;
@@ -148,32 +153,44 @@ function showHome() {
     c.append(el("button", { className: "cta", onclick: startPlacement }, "🎯 Пройти тест уровня"));
   }
   c.append(el("button", { className: "cta green", onclick: startLesson }, "▶ Начать урок"));
+  if (st.account && st.account.token)
+    c.append(el("button", { className: "ghost", onclick: showUserdata }, "📜 Последние ответы"));
   if (st.placement_done)
     c.append(el("p", { className: "dim" }, `Уровень ${st.level} · карточек: ${Object.keys(st.cards).length}`));
   content.append(c);
   setNav("home");
 }
 
+// Гонка «экран загрузки vs отрисовка урока» (баг мобильной жалобы: оверлей
+// закрылся, а урока нет — пользователь остался в меню): при медленном сетевом
+// пути boot-прогрев ещё не завершился, тап по кнопке стартует свой fetch, и
+// hideLoading() мог отработать ДО showTask(). Теперь показ задания выполняется
+// ВНУТРИ try: hideLoading() в finally гарантированно идёт ПОСЛЕ отрисовки
+// первого задания. Если урок не собрался — остаёмся на прежнем экране с
+// понятным тостом, а не на пустоте.
 async function startLesson() {
-  // Живой контент строится на сервере из внешних API — это может быть долго.
-  // Показываем явный экран загрузки вместо «мёртвого» окна (жалоба: «во-первых
-  // долго»); server-side lesson-cache + параллельные HTTP сводят холодный путь
-  // к ~секундам, но UI обязан честно ждать и не выглядеть зависшим.
   showLoading("Готовим живой урок…");
   try {
     lessonLive = await fetchLesson();
+    const ts = lessonLive && lessonLive.tasks;
+    if (!ts || !ts.length) { toast("Не удалось собрать урок", "var(--red)"); return; }
+    tasks = ts; taskI = 0; sessionAnswers = [];
+    showTask();
+  } catch (e) {
+    toast("Ошибка загрузки урока: " + e, "var(--red)");
   } finally { hideLoading(); }
-  tasks = lessonLive.tasks; taskI = 0; sessionAnswers = [];
-  showTask();
 }
 
 async function startPlacement() {
   showLoading("Готовим тест уровня…");
   try {
     placementLive = await fetchPlacement();
+    if (!placementLive || !placementLive.length) { toast("Не удалось собрать тест", "var(--red)"); return; }
+    tasks = placementLive; taskI = 0; plResponses = [];
+    showTask(true);
+  } catch (e) {
+    toast("Ошибка загрузки теста: " + e, "var(--red)");
   } finally { hideLoading(); }
-  tasks = placementLive; taskI = 0; plResponses = [];
-  showTask(true);
 }
 
 // ---------------------------------------------------------------- loading ----
@@ -402,6 +419,25 @@ $("#btn-sync").onclick = async () => {
     updateDashboard(); toast(ud ? `Синхронизировано ✓ · слов ${ud.words}, известно ${ud.known}` : "Синхронизировано ✓", "var(--green)");
   } else toast(push.json.error || "сервер недоступен", "var(--red)");
 };
+
+// ---------------------------------------------------- последние ответы ----
+// GET /api/userdata -> {username, words{...}, answers[...]} — журнал последних
+// ответов сервера (текст + верно/неверно + языки). Рендерим списком; пустой
+// ответ и сетевые ошибки показываем явно, чтобы экран не выглядел «мёртвым».
+async function showUserdata() {
+  if (!st.account.token) { toast("Сначала войди в аккаунт (Настройки)", "var(--red)"); return; }
+  const { json, status } = await api("/api/userdata", "GET", null, false);
+  if (status !== 200 || !json) { toast(json && json.error || "Сервер недоступен", "var(--red)"); return; }
+  const esc2 = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const ans = (json.answers || []).slice().reverse();   // свежие сверху
+  const rows = ans.length
+    ? ans.map(a => `<div class="ud-row"><span class="${a.correct ? "ud-ok" : "ud-bad"}">${a.correct ? "✓" : "✗"}</span> <b>${esc2(a.text || "(без текста)")}</b> <span class="ud-langs">${(a.langs || []).map(esc2).join(", ")}</span></div>`).join("")
+    : `<div class="ud-empty">Пока пусто — ответь на пару карточек и нажми «Синхронизировать».</div>`;
+  content.innerHTML = `<h2>Последние ответы</h2>
+    <p class="dim">слов в работе: ${Object.keys(json.words || {}).length}${json.username ? " · " + esc2(json.username) : ""}</p>
+    <div id="ud-list">${rows}</div>`;
+  content.append(el("button", { className: "cta", onclick: showHome }, "← Меню"));
+}
 
 // ------------------------------------------------------ AFK-темп-монитор ----
 let idleSince = Date.now();
